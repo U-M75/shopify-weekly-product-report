@@ -9,7 +9,7 @@ const EMAIL_APP_PASSWORD = process.env.EMAIL_APP_PASSWORD;
 const REPORT_RECIPIENT = process.env.REPORT_RECIPIENT;
 
 /**
- * ✅ GET ALL PRODUCTS (Pagination + Fixed publications schema)
+ * ✅ GET ALL PRODUCTS (FULL DATA FOR AUDIT)
  */
 async function getProducts() {
   let products = [];
@@ -33,12 +33,34 @@ async function getProducts() {
             updatedAt
             publishedAt
 
+            tags
+            totalInventory
+
+            images(first: 1) {
+              edges {
+                node {
+                  id
+                }
+              }
+            }
+
+            variants(first: 100) {
+              edges {
+                node {
+                  sku
+                  barcode
+                  price
+                  weight
+                  inventoryQuantity
+                }
+              }
+            }
+
             resourcePublicationsV2(first: 10) {
               edges {
                 node {
                   isPublished
                   publication {
-                    id
                     name
                   }
                 }
@@ -62,7 +84,6 @@ async function getProducts() {
 
     const responseData = response.data;
 
-    // ❌ GraphQL error handling
     if (responseData.errors) {
       console.log("❌ Shopify GraphQL Errors:");
       console.log(JSON.stringify(responseData.errors, null, 2));
@@ -90,7 +111,7 @@ async function getProducts() {
 }
 
 /**
- * 📊 SEND EMAIL REPORT
+ * 📊 SEND AUDIT REPORT
  */
 async function sendReport() {
   const products = await getProducts();
@@ -101,8 +122,18 @@ async function sendReport() {
   let active = 0;
   let draft = 0;
   let archived = 0;
-  let unpublished = 0;
-  let unlisted = 0;
+
+  let missingSKU = 0;
+  let missingBarcode = 0;
+  let missingWeight = 0;
+  let missingImage = 0;
+  let missingPrice = 0;
+  let missingTags = 0;
+  let zeroInventory = 0;
+
+  let skuMap = {};
+  let barcodeMap = {};
+
   let createdLast7Days = 0;
   let updatedLast7Days = 0;
 
@@ -119,46 +150,68 @@ async function sendReport() {
       updatedLast7Days++;
     }
 
-    const pubs = product.resourcePublicationsV2?.edges || [];
+    const variants = product.variants?.edges || [];
+    const firstVariant = variants[0]?.node || {};
 
-    // ✅ UNPUBLISHED: no publications at all
-    if (pubs.length === 0) {
-      unpublished++;
+    // -------------------
+    // Missing checks
+    // -------------------
+    if (!firstVariant.sku) missingSKU++;
+    if (!firstVariant.barcode) missingBarcode++;
+    if (!firstVariant.weight) missingWeight++;
+    if (!firstVariant.price) missingPrice++;
+    if (!product.images?.edges?.length) missingImage++;
+    if (!product.tags || product.tags.length === 0) missingTags++;
+
+    const totalInventory = product.totalInventory || 0;
+    if (totalInventory === 0) zeroInventory++;
+
+    // -------------------
+    // Duplicate tracking
+    // -------------------
+    if (firstVariant.sku) {
+      skuMap[firstVariant.sku] = (skuMap[firstVariant.sku] || 0) + 1;
     }
 
-    // ✅ UNLISTED: Online Store channel exists but isPublished is false
-    // Matches Shopify's "Unlisted" — accessible via direct link but hidden from search/browse
-    const onlineStorePub = pubs.find((edge) =>
-      edge.node.publication?.name?.toLowerCase().includes("online store")
-    );
-
-    if (onlineStorePub && onlineStorePub.node.isPublished === false) {
-      unlisted++;
+    if (firstVariant.barcode) {
+      barcodeMap[firstVariant.barcode] =
+        (barcodeMap[firstVariant.barcode] || 0) + 1;
     }
   });
+
+  const duplicateSKU = Object.values(skuMap).filter((c) => c > 1).length;
+  const duplicateBarcode = Object.values(barcodeMap).filter((c) => c > 1).length;
 
   const html = `
   <div style="font-family: Arial; padding:20px; background:#f6f6f6;">
     
     <div style="background:#111; color:#fff; padding:15px; border-radius:8px;">
-      <h2 style="margin:0;">📊 Weekly Shopify Product Report</h2>
+      <h2 style="margin:0;">📊 Shopify Product Health Audit Report</h2>
     </div>
 
     <div style="background:#fff; padding:20px; margin-top:10px; border-radius:8px;">
 
-      <h3>Product Summary</h3>
+      <h3>📦 Product Summary</h3>
 
       <table border="1" cellpadding="10" cellspacing="0" width="100%" style="border-collapse:collapse;">
-        <tr>
-          <th>Metric</th>
-          <th>Count</th>
-        </tr>
+        <tr><th>Metric</th><th>Count</th></tr>
 
         <tr><td>Active Products</td><td>${active}</td></tr>
         <tr><td>Draft Products</td><td>${draft}</td></tr>
         <tr><td>Archived Products</td><td>${archived}</td></tr>
-        <tr><td>Unpublished Products</td><td>${unpublished}</td></tr>
-        <tr><td>Unlisted Products</td><td>${unlisted}</td></tr>
+
+        <tr><td>Missing SKU</td><td>${missingSKU}</td></tr>
+        <tr><td>Missing Barcode</td><td>${missingBarcode}</td></tr>
+        <tr><td>Missing Weight</td><td>${missingWeight}</td></tr>
+        <tr><td>Missing Image</td><td>${missingImage}</td></tr>
+        <tr><td>Missing Price</td><td>${missingPrice}</td></tr>
+        <tr><td>Missing Tags</td><td>${missingTags}</td></tr>
+
+        <tr><td>Zero Inventory</td><td>${zeroInventory}</td></tr>
+
+        <tr><td>Duplicate SKU</td><td>${duplicateSKU}</td></tr>
+        <tr><td>Duplicate Barcode</td><td>${duplicateBarcode}</td></tr>
+
         <tr><td>Created Last 7 Days</td><td>${createdLast7Days}</td></tr>
         <tr><td>Updated Last 7 Days</td><td>${updatedLast7Days}</td></tr>
       </table>
@@ -166,7 +219,7 @@ async function sendReport() {
     </div>
 
     <p style="text-align:center; color:#888; font-size:12px; margin-top:20px;">
-      Auto-generated Shopify Monday Report
+      Auto-generated Shopify Monday Audit Report
     </p>
 
   </div>
@@ -183,11 +236,11 @@ async function sendReport() {
   await transporter.sendMail({
     from: EMAIL_USER,
     to: REPORT_RECIPIENT,
-    subject: "📊 Weekly Shopify Product Report",
+    subject: "📊 Shopify Product Health Audit Report",
     html,
   });
 
-  console.log("✅ Email sent successfully");
+  console.log("✅ Audit Email Sent Successfully");
 }
 
 sendReport().catch(console.error);
