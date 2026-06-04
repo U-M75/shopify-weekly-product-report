@@ -33,7 +33,7 @@ async function getProducts() {
             updatedAt
             publishedAt
 
-            publications(first: 10) {
+            resourcePublicationsV2(first: 10) {
               edges {
                 node {
                   publication {
@@ -118,7 +118,7 @@ async function sendReport() {
     }
 
     // ✅ FIXED UNPUBLISHED LOGIC
-    const pubs = product.publications?.edges || [];
+    const pubs = product.resourcePublicationsV2?.edges || [];
 
     if (pubs.length === 0) {
       unpublished++;
