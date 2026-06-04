@@ -9,7 +9,7 @@ const EMAIL_APP_PASSWORD = process.env.EMAIL_APP_PASSWORD;
 const REPORT_RECIPIENT = process.env.REPORT_RECIPIENT;
 
 /**
- * ✅ GET ALL PRODUCTS (Pagination enabled)
+ * ✅ GET ALL PRODUCTS (Pagination + Fixed publications schema)
  */
 async function getProducts() {
   let products = [];
@@ -32,10 +32,14 @@ async function getProducts() {
             createdAt
             updatedAt
             publishedAt
+
             publications(first: 10) {
               edges {
                 node {
-                  name
+                  publication {
+                    id
+                    name
+                  }
                 }
               }
             }
@@ -55,19 +59,15 @@ async function getProducts() {
       }
     );
 
-    // =========================
-    // 🔥 SAFE RESPONSE HANDLING
-    // =========================
     const responseData = response.data;
 
-    // ❌ GraphQL errors check
+    // ❌ GraphQL error handling
     if (responseData.errors) {
       console.log("❌ Shopify GraphQL Errors:");
       console.log(JSON.stringify(responseData.errors, null, 2));
       throw new Error("GraphQL query failed");
     }
 
-    // ❌ Missing data check
     if (!responseData.data || !responseData.data.products) {
       console.log("❌ Invalid API Response:");
       console.log(JSON.stringify(responseData, null, 2));
@@ -76,14 +76,8 @@ async function getProducts() {
 
     const result = responseData.data.products;
 
-    // =========================
-    // 📦 PUSH PRODUCTS
-    // =========================
     products.push(...result.edges.map((edge) => edge.node));
 
-    // =========================
-    // 🔁 PAGINATION LOGIC
-    // =========================
     hasNextPage = result.pageInfo.hasNextPage;
 
     if (hasNextPage && result.edges.length > 0) {
@@ -93,6 +87,7 @@ async function getProducts() {
 
   return products;
 }
+
 /**
  * 📊 SEND EMAIL REPORT
  */
@@ -122,8 +117,10 @@ async function sendReport() {
       updatedLast7Days++;
     }
 
-    // ✅ Unpublished logic
-    if (!product.publications || product.publications.edges.length === 0) {
+    // ✅ FIXED UNPUBLISHED LOGIC
+    const pubs = product.publications?.edges || [];
+
+    if (pubs.length === 0) {
       unpublished++;
     }
   });
