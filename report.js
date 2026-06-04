@@ -36,6 +36,7 @@ async function getProducts() {
             resourcePublicationsV2(first: 10) {
               edges {
                 node {
+                  isPublished
                   publication {
                     id
                     name
@@ -101,6 +102,7 @@ async function sendReport() {
   let draft = 0;
   let archived = 0;
   let unpublished = 0;
+  let unlisted = 0;
   let createdLast7Days = 0;
   let updatedLast7Days = 0;
 
@@ -117,11 +119,21 @@ async function sendReport() {
       updatedLast7Days++;
     }
 
-    // ✅ FIXED UNPUBLISHED LOGIC
     const pubs = product.resourcePublicationsV2?.edges || [];
 
+    // ✅ UNPUBLISHED: no publications at all
     if (pubs.length === 0) {
       unpublished++;
+    }
+
+    // ✅ UNLISTED: Online Store channel exists but isPublished is false
+    // Matches Shopify's "Unlisted" — accessible via direct link but hidden from search/browse
+    const onlineStorePub = pubs.find((edge) =>
+      edge.node.publication?.name?.toLowerCase().includes("online store")
+    );
+
+    if (onlineStorePub && onlineStorePub.node.isPublished === false) {
+      unlisted++;
     }
   });
 
@@ -146,6 +158,7 @@ async function sendReport() {
         <tr><td>Draft Products</td><td>${draft}</td></tr>
         <tr><td>Archived Products</td><td>${archived}</td></tr>
         <tr><td>Unpublished Products</td><td>${unpublished}</td></tr>
+        <tr><td>Unlisted Products</td><td>${unlisted}</td></tr>
         <tr><td>Created Last 7 Days</td><td>${createdLast7Days}</td></tr>
         <tr><td>Updated Last 7 Days</td><td>${updatedLast7Days}</td></tr>
       </table>
