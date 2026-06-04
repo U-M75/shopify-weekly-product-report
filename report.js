@@ -55,20 +55,44 @@ async function getProducts() {
       }
     );
 
-    const result = response.data.data.products;
+    // =========================
+    // 🔥 SAFE RESPONSE HANDLING
+    // =========================
+    const responseData = response.data;
 
+    // ❌ GraphQL errors check
+    if (responseData.errors) {
+      console.log("❌ Shopify GraphQL Errors:");
+      console.log(JSON.stringify(responseData.errors, null, 2));
+      throw new Error("GraphQL query failed");
+    }
+
+    // ❌ Missing data check
+    if (!responseData.data || !responseData.data.products) {
+      console.log("❌ Invalid API Response:");
+      console.log(JSON.stringify(responseData, null, 2));
+      throw new Error("Products data not found");
+    }
+
+    const result = responseData.data.products;
+
+    // =========================
+    // 📦 PUSH PRODUCTS
+    // =========================
     products.push(...result.edges.map((edge) => edge.node));
 
+    // =========================
+    // 🔁 PAGINATION LOGIC
+    // =========================
     hasNextPage = result.pageInfo.hasNextPage;
 
-    if (hasNextPage) {
+    if (hasNextPage && result.edges.length > 0) {
       cursor = result.edges[result.edges.length - 1].cursor;
     }
   }
 
   return products;
 }
-
 /**
  * 📊 SEND EMAIL REPORT
  */
