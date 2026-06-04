@@ -9,33 +9,53 @@ const EMAIL_APP_PASSWORD = process.env.EMAIL_APP_PASSWORD;
 const REPORT_RECIPIENT = process.env.REPORT_RECIPIENT;
 
 async function getProducts() {
-  const query = `
-  {
-    products(first: 250) {
-      edges {
-        node {
-          id
-          title
-          status
-          createdAt
-          updatedAt
+  let products = [];
+  let hasNextPage = true;
+  let cursor = null;
+
+  while (hasNextPage) {
+    const query = `
+    {
+      products(first: 250 ${cursor ? `, after: "${cursor}"` : ""}) {
+        pageInfo {
+          hasNextPage
+        }
+        edges {
+          cursor
+          node {
+            id
+            title
+            status
+            createdAt
+            updatedAt
+          }
         }
       }
-    }
-  }`;
+    }`;
 
-  const response = await axios.post(
-    `https://${SHOP}/admin/api/2025-10/graphql.json`,
-    { query },
-    {
-      headers: {
-        "X-Shopify-Access-Token": TOKEN,
-        "Content-Type": "application/json"
+    const response = await axios.post(
+      `https://${SHOP}/admin/api/2025-10/graphql.json`,
+      { query },
+      {
+        headers: {
+          "X-Shopify-Access-Token": TOKEN,
+          "Content-Type": "application/json"
+        }
       }
-    }
-  );
+    );
 
-  return response.data.data.products.edges.map(edge => edge.node);
+    const result = response.data.data.products;
+
+    products.push(...result.edges.map(edge => edge.node));
+
+    hasNextPage = result.pageInfo.hasNextPage;
+
+    if (hasNextPage) {
+      cursor = result.edges[result.edges.length - 1].cursor;
+    }
+  }
+
+  return products;
 }
 
 async function sendReport() {
