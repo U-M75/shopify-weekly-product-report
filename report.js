@@ -5,6 +5,22 @@ const TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
 const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL;
 
 /**
+ * Extract numeric ID from Shopify GID
+ * e.g. "gid://shopify/Product/1234567890" → "1234567890"
+ */
+function extractId(gid) {
+  return gid ? gid.split("/").pop() : null;
+}
+
+/**
+ * Build Shopify admin product URL
+ */
+function adminLink(gid) {
+  const id = extractId(gid);
+  return `https://${SHOP}/admin/products/${id}`;
+}
+
+/**
  * ✅ GET ALL PRODUCTS (FULL DATA FOR AUDIT)
  */
 async function getProducts() {
@@ -147,7 +163,8 @@ async function sendReport() {
 
     // Channel checks
     const pubs = product.resourcePublicationsV2?.edges || [];
-    const getChannel = (kw) => pubs.find((e) => e.node.publication?.name?.toLowerCase().includes(kw));
+    const getChannel = (kw) =>
+      pubs.find((e) => e.node.publication?.name?.toLowerCase().includes(kw));
 
     const onlineStorePub = getChannel("online store");
     const wholesalePub   = getChannel("wholesale");
@@ -156,25 +173,32 @@ async function sendReport() {
     if (pubs.length === 0) unpublished++;
     if (onlineStorePub && !onlineStorePub.node.isPublished) unlisted++;
 
-    const isActive = product.status === "ACTIVE";
-    const noOnlineStore = !onlineStorePub || !onlineStorePub.node.isPublished;
-    const noWholesale   = !wholesalePub   || !wholesalePub.node.isPublished;
-    const noPOS         = !posPub         || !posPub.node.isPublished;
+    const isActive       = product.status === "ACTIVE";
+    const noOnlineStore  = !onlineStorePub || !onlineStorePub.node.isPublished;
+    const noWholesale    = !wholesalePub   || !wholesalePub.node.isPublished;
+    const noPOS          = !posPub         || !posPub.node.isPublished;
     const publishedCount = pubs.filter((e) => e.node.isPublished).length;
 
-    if (isActive && noOnlineStore)      missingOnlineStore++;
-    if (isActive && noWholesale)        missingWholesale++;
-    if (isActive && noPOS)              missingPOS++;
+    if (isActive && noOnlineStore)       missingOnlineStore++;
+    if (isActive && noWholesale)         missingWholesale++;
+    if (isActive && noPOS)               missingPOS++;
     if (isActive && publishedCount === 0) notPublishedAnywhere++;
     if (!isActive && publishedCount > 0)  channelConflict++;
 
     const channelIssues = [];
-    if (isActive && noOnlineStore)       channelIssues.push("No Online Store");
-    if (isActive && noWholesale)         channelIssues.push("No Wholesale");
-    if (isActive && noPOS)               channelIssues.push("No POS");
+    if (isActive && noOnlineStore)        channelIssues.push("No Online Store");
+    if (isActive && noWholesale)          channelIssues.push("No Wholesale");
+    if (isActive && noPOS)                channelIssues.push("No POS");
     if (isActive && publishedCount === 0) channelIssues.push("Not Published Anywhere");
     if (!isActive && publishedCount > 0)  channelIssues.push("Channel Conflict");
-    if (channelIssues.length > 0) productChannelRows.push({ title: product.title, issues: channelIssues });
+
+    if (channelIssues.length > 0) {
+      productChannelRows.push({
+        title: product.title,
+        issues: channelIssues,
+        link: adminLink(product.id),
+      });
+    }
 
     // Missing checks
     const noImage       = !product.images?.edges?.length;
@@ -205,8 +229,11 @@ async function sendReport() {
       const hsCode = v.inventoryItem?.harmonizedSystemCode;
       if (!hsCode || hsCode.trim() === "")         noHS      = true;
 
-      const sizeOption = v.selectedOptions?.find((o) => o.name.toLowerCase() === "size");
-      if (!sizeOption || !sizeOption.value || sizeOption.value.toLowerCase() === "default title") noSize = true;
+      const sizeOption = v.selectedOptions?.find(
+        (o) => o.name.toLowerCase() === "size"
+      );
+      if (!sizeOption || !sizeOption.value ||
+          sizeOption.value.toLowerCase() === "default title") noSize = true;
 
       if (v.sku && v.sku.trim() !== "")
         skuMap[v.sku] = (skuMap[v.sku] || 0) + 1;
@@ -234,7 +261,14 @@ async function sendReport() {
     if (noCollections) missing.push("Collection");
     if (noHS)          missing.push("HS Code");
     if (noInventory)   missing.push("Inventory");
-    if (missing.length > 0) productMissingRows.push({ title: product.title, missing });
+
+    if (missing.length > 0) {
+      productMissingRows.push({
+        title: product.title,
+        missing,
+        link: adminLink(product.id),
+      });
+    }
   });
 
   const duplicateSKU     = Object.values(skuMap).filter((c) => c > 1).length;
@@ -248,40 +282,42 @@ async function sendReport() {
     weekday: "long", year: "numeric", month: "long", day: "numeric",
   });
 
-  // ── Slack helper: stat line ────────────────────────────────
+  // ── Slack helpers ──────────────────────────────────────────
+
   const stat = (emoji, label, value, warn = false) =>
     `${emoji} *${label}:* ${warn && value > 0 ? `*${value}* ⚠️` : value}`;
 
-  // ── Slack helper: product list (max 20 to avoid message limits) ──
+  // Product list with clickable admin link
   const productList = (rows, fieldKey) => {
     if (rows.length === 0) return "_✅ None_";
-    const lines = rows.slice(0, 20).map(
-      (p) => `• *${p.title}* — ${(p[fieldKey] || []).join(", ")}`
-    );
+    const lines = rows.slice(0, 20).map((p) => {
+      const fields = (p[fieldKey] || []).join(", ");
+      return `• <${p.link}|${p.title}> — \`${fields}\``;
+    });
     if (rows.length > 20) lines.push(`_...and ${rows.length - 20} more_`);
     return lines.join("\n");
   };
 
-  // ── Build Slack Block Kit payload ─────────────────────────
+  // ── Slack Block Kit payload ────────────────────────────────
   const payload = {
     blocks: [
 
-      // ── HEADER ──────────────────────────────────────────
+      // HEADER
       {
         type: "header",
         text: { type: "plain_text", text: "📊 Shopify Product Health Audit", emoji: true },
       },
       {
         type: "context",
-        elements: [{ type: "mrkdwn", text: `${reportDate}  •  *${totalFlagged} products need attention*` }],
+        elements: [{
+          type: "mrkdwn",
+          text: `${reportDate}  •  *${totalFlagged} products need attention*`,
+        }],
       },
       { type: "divider" },
 
-      // ── PRODUCT STATUS ───────────────────────────────────
-      {
-        type: "section",
-        text: { type: "mrkdwn", text: "*📦 Product Status*" },
-      },
+      // PRODUCT STATUS
+      { type: "section", text: { type: "mrkdwn", text: "*📦 Product Status*" } },
       {
         type: "section",
         fields: [
@@ -296,86 +332,78 @@ async function sendReport() {
       },
       { type: "divider" },
 
-      // ── MISSING DATA ─────────────────────────────────────
-      {
-        type: "section",
-        text: { type: "mrkdwn", text: "*⚠️ Missing Data*" },
-      },
+      // MISSING DATA
+      { type: "section", text: { type: "mrkdwn", text: "*⚠️ Missing Data*" } },
       {
         type: "section",
         fields: [
-          { type: "mrkdwn", text: stat("🔖", "Barcode",      missingBarcode,     true) },
-          { type: "mrkdwn", text: stat("🏷️", "SKU",         missingSKU,         true) },
-          { type: "mrkdwn", text: stat("⚖️", "Weight",       missingWeight,      true) },
-          { type: "mrkdwn", text: stat("📐", "Size",          missingSize,        true) },
-          { type: "mrkdwn", text: stat("🖼️", "Image",        missingImage,       true) },
-          { type: "mrkdwn", text: stat("💰", "Price",         missingPrice,       true) },
-          { type: "mrkdwn", text: stat("🧾", "Cost",          missingCost,        true) },
-          { type: "mrkdwn", text: stat("🏷️", "Tags",         missingTags,        true) },
-          { type: "mrkdwn", text: stat("📁", "Collections",   missingCollections, true) },
-          { type: "mrkdwn", text: stat("🌐", "HS Code",       missingHSCode,      true) },
+          { type: "mrkdwn", text: stat("🔖", "Barcode",       missingBarcode,     true) },
+          { type: "mrkdwn", text: stat("🏷️", "SKU",          missingSKU,         true) },
+          { type: "mrkdwn", text: stat("⚖️", "Weight",        missingWeight,      true) },
+          { type: "mrkdwn", text: stat("📐", "Size",           missingSize,        true) },
+          { type: "mrkdwn", text: stat("🖼️", "Image",         missingImage,       true) },
+          { type: "mrkdwn", text: stat("💰", "Price",          missingPrice,       true) },
+          { type: "mrkdwn", text: stat("🧾", "Cost",           missingCost,        true) },
+          { type: "mrkdwn", text: stat("🏷️", "Tags",          missingTags,        true) },
+          { type: "mrkdwn", text: stat("📁", "Collections",    missingCollections, true) },
+          { type: "mrkdwn", text: stat("🌐", "HS Code",        missingHSCode,      true) },
         ],
       },
       { type: "divider" },
 
-      // ── INVENTORY & DUPLICATES ───────────────────────────
-      {
-        type: "section",
-        text: { type: "mrkdwn", text: "*🔍 Inventory & Duplicates*" },
-      },
+      // INVENTORY & DUPLICATES
+      { type: "section", text: { type: "mrkdwn", text: "*🔍 Inventory & Duplicates*" } },
       {
         type: "section",
         fields: [
-          { type: "mrkdwn", text: stat("📦", "Zero Inventory",     zeroInventory,     true) },
-          { type: "mrkdwn", text: stat("♻️", "Duplicate SKUs",    duplicateSKU,      true) },
-          { type: "mrkdwn", text: stat("♻️", "Duplicate Barcodes",duplicateBarcode,  true) },
+          { type: "mrkdwn", text: stat("📦", "Zero Inventory",      zeroInventory,    true) },
+          { type: "mrkdwn", text: stat("♻️", "Duplicate SKUs",     duplicateSKU,     true) },
+          { type: "mrkdwn", text: stat("♻️", "Duplicate Barcodes", duplicateBarcode, true) },
         ],
       },
       { type: "divider" },
 
-      // ── SALES CHANNEL AUDIT ──────────────────────────────
-      {
-        type: "section",
-        text: { type: "mrkdwn", text: "*📡 Sales Channel / Distribution Audit*" },
-      },
+      // SALES CHANNEL AUDIT
+      { type: "section", text: { type: "mrkdwn", text: "*📡 Sales Channel / Distribution Audit*" } },
       {
         type: "section",
         fields: [
-          { type: "mrkdwn", text: stat("🛍️", "Missing Online Store", missingOnlineStore,   true) },
-          { type: "mrkdwn", text: stat("🤝", "Missing Wholesale",     missingWholesale,     true) },
-          { type: "mrkdwn", text: stat("🏪", "Missing POS",           missingPOS,           true) },
-          { type: "mrkdwn", text: stat("🚫", "Not Published Anywhere",notPublishedAnywhere, true) },
-          { type: "mrkdwn", text: stat("⚡", "Channel Conflicts",     channelConflict,      true) },
+          { type: "mrkdwn", text: stat("🛍️", "Missing Online Store",    missingOnlineStore,   true) },
+          { type: "mrkdwn", text: stat("🤝", "Missing Wholesale",        missingWholesale,     true) },
+          { type: "mrkdwn", text: stat("🏪", "Missing POS",              missingPOS,           true) },
+          { type: "mrkdwn", text: stat("🚫", "Not Published Anywhere",   notPublishedAnywhere, true) },
+          { type: "mrkdwn", text: stat("⚡", "Channel Conflicts",        channelConflict,      true) },
         ],
       },
       { type: "divider" },
 
-      // ── PRODUCT DETAIL — MISSING DATA ────────────────────
+      // PRODUCT DETAIL — MISSING DATA
       {
         type: "section",
         text: {
           type: "mrkdwn",
-          text: `*📋 Products with Missing Data* (${productMissingRows.length} products)\n${productList(productMissingRows, "missing")}`,
+          text: `*📋 Products with Missing Data* (${productMissingRows.length} products)\n\n${productList(productMissingRows, "missing")}`,
         },
       },
       { type: "divider" },
 
-      // ── PRODUCT DETAIL — CHANNEL ISSUES ─────────────────
+      // PRODUCT DETAIL — CHANNEL ISSUES
       {
         type: "section",
         text: {
           type: "mrkdwn",
-          text: `*📡 Products with Channel Issues* (${productChannelRows.length} products)\n${productList(productChannelRows, "issues")}`,
+          text: `*📡 Products with Channel Issues* (${productChannelRows.length} products)\n\n${productList(productChannelRows, "issues")}`,
         },
       },
       { type: "divider" },
 
-      // ── FOOTER ──────────────────────────────────────────
+      // FOOTER
       {
         type: "context",
-        elements: [
-          { type: "mrkdwn", text: `🤖 Auto-generated Shopify Audit Report  •  ${reportDate}` },
-        ],
+        elements: [{
+          type: "mrkdwn",
+          text: `🤖 Auto-generated Shopify Audit Report  •  ${reportDate}`,
+        }],
       },
     ],
   };
