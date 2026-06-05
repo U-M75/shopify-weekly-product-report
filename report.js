@@ -144,125 +144,136 @@ async function sendReport() {
   const sevenDaysAgo = new Date();
   sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
 
+  // ── Summary counters ───────────────────────────────────────
   let active = 0, draft = 0, archived = 0, unpublished = 0, unlisted = 0;
   let createdLast7Days = 0, updatedLast7Days = 0;
 
-  // Missing field counters (product-level)
-  let missingImage = 0;
-  let missingTags = 0;
-  let missingCollections = 0;
-
-  // Missing field counters (variant-level — flagged if ANY variant has issue)
-  let missingSKU = 0;
-  let missingBarcode = 0;
-  let missingWeight = 0;
-  let missingPrice = 0;
-  let missingCost = 0;
-  let missingSize = 0;
-  let missingHSCode = 0;
+  let missingImage = 0, missingTags = 0, missingCollections = 0;
+  let missingSKU = 0, missingBarcode = 0, missingWeight = 0;
+  let missingPrice = 0, missingCost = 0, missingSize = 0, missingHSCode = 0;
   let zeroInventory = 0;
 
-  // Duplicate tracking (across all variants)
-  let skuMap = {};
-  let barcodeMap = {};
+  let skuMap = {}, barcodeMap = {};
+
+  // ── Per-product missing info (for detail table) ────────────
+  const productRows = [];
 
   products.forEach((product) => {
-    // ── Status counts ──────────────────────────────────────────
-    if (product.status === "ACTIVE") active++;
-    if (product.status === "DRAFT") draft++;
-    if (product.status === "ARCHIVED") archived++;
+    // Status
+    if (product.status === "ACTIVE")    active++;
+    if (product.status === "DRAFT")     draft++;
+    if (product.status === "ARCHIVED")  archived++;
 
     if (new Date(product.createdAt) >= sevenDaysAgo) createdLast7Days++;
     if (new Date(product.updatedAt) >= sevenDaysAgo) updatedLast7Days++;
 
-    // ── Published / Unlisted ───────────────────────────────────
+    // Published / Unlisted
     const pubs = product.resourcePublicationsV2?.edges || [];
-    if (pubs.length === 0) {
-      unpublished++;
-    }
+    if (pubs.length === 0) unpublished++;
     const onlineStorePub = pubs.find((e) =>
       e.node.publication?.name?.toLowerCase().includes("online store")
     );
-    if (onlineStorePub && onlineStorePub.node.isPublished === false) {
-      unlisted++;
-    }
+    if (onlineStorePub && onlineStorePub.node.isPublished === false) unlisted++;
 
-    // ── Product-level missing checks ───────────────────────────
-    if (!product.images?.edges?.length)           missingImage++;
-    if (!product.tags || product.tags.length === 0) missingTags++;
-    if (!product.collections?.edges?.length)       missingCollections++;
+    // Product-level checks
+    const noImage       = !product.images?.edges?.length;
+    const noTags        = !product.tags || product.tags.length === 0;
+    const noCollections = !product.collections?.edges?.length;
+    const noInventory   = (product.totalInventory || 0) === 0;
 
-    // ── Inventory ──────────────────────────────────────────────
-    if ((product.totalInventory || 0) === 0) zeroInventory++;
+    if (noImage)       missingImage++;
+    if (noTags)        missingTags++;
+    if (noCollections) missingCollections++;
+    if (noInventory)   zeroInventory++;
 
-    // ── Variant-level missing checks ───────────────────────────
+    // Variant-level checks
     const variants = product.variants?.edges || [];
 
-    let productMissingSKU      = false;
-    let productMissingBarcode  = false;
-    let productMissingWeight   = false;
-    let productMissingPrice    = false;
-    let productMissingCost     = false;
-    let productMissingSize     = false;
-    let productMissingHSCode   = false;
+    let noSKU = false, noBarcode = false, noWeight = false;
+    let noPrice = false, noCost = false, noSize = false, noHS = false;
 
     variants.forEach(({ node: v }) => {
-      if (!v.sku || v.sku.trim() === "")   productMissingSKU = true;
-      if (!v.barcode || v.barcode.trim() === "") productMissingBarcode = true;
-      if (!v.price || parseFloat(v.price) === 0) productMissingPrice = true;
+      if (!v.sku     || v.sku.trim() === "")              noSKU     = true;
+      if (!v.barcode || v.barcode.trim() === "")          noBarcode = true;
+      if (!v.price   || parseFloat(v.price) === 0)        noPrice   = true;
 
-      // Weight inside inventoryItem.measurement.weight
       const weightVal = v.inventoryItem?.measurement?.weight?.value;
-      if (!weightVal || weightVal === 0)   productMissingWeight = true;
+      if (!weightVal || weightVal === 0)                  noWeight  = true;
 
-      // Cost inside inventoryItem.unitCost.amount
       const costVal = v.inventoryItem?.unitCost?.amount;
-      if (!costVal || parseFloat(costVal) === 0) productMissingCost = true;
+      if (!costVal || parseFloat(costVal) === 0)          noCost    = true;
 
-      // HS / Tariff Code
       const hsCode = v.inventoryItem?.harmonizedSystemCode;
-      if (!hsCode || hsCode.trim() === "") productMissingHSCode = true;
+      if (!hsCode || hsCode.trim() === "")                noHS      = true;
 
-      // Size — look for a "Size" option in selectedOptions
       const sizeOption = v.selectedOptions?.find(
         (o) => o.name.toLowerCase() === "size"
       );
-      if (!sizeOption || !sizeOption.value || sizeOption.value.toLowerCase() === "default title") {
-        productMissingSize = true;
-      }
+      if (!sizeOption || !sizeOption.value ||
+          sizeOption.value.toLowerCase() === "default title") noSize = true;
 
-      // Duplicate SKU / Barcode tracking
-      if (v.sku && v.sku.trim() !== "") {
+      if (v.sku && v.sku.trim() !== "")
         skuMap[v.sku] = (skuMap[v.sku] || 0) + 1;
-      }
-      if (v.barcode && v.barcode.trim() !== "") {
+      if (v.barcode && v.barcode.trim() !== "")
         barcodeMap[v.barcode] = (barcodeMap[v.barcode] || 0) + 1;
-      }
     });
 
-    if (productMissingSKU)     missingSKU++;
-    if (productMissingBarcode) missingBarcode++;
-    if (productMissingWeight)  missingWeight++;
-    if (productMissingPrice)   missingPrice++;
-    if (productMissingCost)    missingCost++;
-    if (productMissingSize)    missingSize++;
-    if (productMissingHSCode)  missingHSCode++;
+    if (noSKU)      missingSKU++;
+    if (noBarcode)  missingBarcode++;
+    if (noWeight)   missingWeight++;
+    if (noPrice)    missingPrice++;
+    if (noCost)     missingCost++;
+    if (noSize)     missingSize++;
+    if (noHS)       missingHSCode++;
+
+    // Collect missing labels for this product
+    const missing = [];
+    if (noBarcode)    missing.push("Barcode");
+    if (noSKU)        missing.push("SKU");
+    if (noWeight)     missing.push("Weight");
+    if (noSize)       missing.push("Size");
+    if (noImage)      missing.push("Image");
+    if (noPrice)      missing.push("Price");
+    if (noCost)       missing.push("Cost");
+    if (noTags)       missing.push("Tags");
+    if (noCollections) missing.push("Collection");
+    if (noHS)         missing.push("HS Code");
+    if (noInventory)  missing.push("Inventory");
+
+    if (missing.length > 0) {
+      productRows.push({ title: product.title, missing });
+    }
   });
 
-  const duplicateSKU      = Object.values(skuMap).filter((c) => c > 1).length;
-  const duplicateBarcode  = Object.values(barcodeMap).filter((c) => c > 1).length;
+  const duplicateSKU     = Object.values(skuMap).filter((c) => c > 1).length;
+  const duplicateBarcode = Object.values(barcodeMap).filter((c) => c > 1).length;
 
-  // ── Helper for coloured rows ───────────────────────────────
+  // ── HTML helpers ───────────────────────────────────────────
   const row = (label, value, warn = false) => `
     <tr style="background:${warn && value > 0 ? "#fff8e1" : "#fff"};">
       <td style="padding:10px; border:1px solid #ddd;">${label}</td>
       <td style="padding:10px; border:1px solid #ddd; font-weight:bold; color:${warn && value > 0 ? "#e65100" : "#111"};">${value}</td>
     </tr>`;
 
-  const html = `
-  <div style="font-family: Arial; padding:20px; background:#f6f6f6;">
+  // Badge per missing field
+  const badge = (label) =>
+    `<span style="display:inline-block; margin:2px 3px; padding:3px 8px; border-radius:12px; background:#fff3e0; color:#e65100; font-size:11px; border:1px solid #ffcc80;">${label}</span>`;
 
-    <div style="background:#111; color:#fff; padding:15px; border-radius:8px;">
+  const detailRows = productRows
+    .map(
+      (p, i) => `
+      <tr style="background:${i % 2 === 0 ? "#fff" : "#fafafa"};">
+        <td style="padding:10px 12px; border:1px solid #ddd; font-weight:600; vertical-align:top; min-width:200px;">${p.title}</td>
+        <td style="padding:8px 12px; border:1px solid #ddd;">${p.missing.map(badge).join("")}</td>
+      </tr>`
+    )
+    .join("");
+
+  const html = `
+  <div style="font-family: Arial, sans-serif; padding:20px; background:#f6f6f6;">
+
+    <!-- HEADER -->
+    <div style="background:#111; color:#fff; padding:15px 20px; border-radius:8px;">
       <h2 style="margin:0;">📊 Shopify Product Health Audit Report</h2>
     </div>
 
@@ -270,22 +281,28 @@ async function sendReport() {
     <div style="background:#fff; padding:20px; margin-top:10px; border-radius:8px;">
       <h3 style="margin-top:0;">📦 Product Status</h3>
       <table width="100%" style="border-collapse:collapse;">
-        <tr style="background:#f0f0f0;"><th style="padding:10px; border:1px solid #ddd; text-align:left;">Metric</th><th style="padding:10px; border:1px solid #ddd; text-align:left;">Count</th></tr>
-        ${row("Active Products",        active)}
-        ${row("Draft Products",         draft)}
-        ${row("Archived Products",      archived)}
-        ${row("Unpublished Products",   unpublished,  true)}
-        ${row("Unlisted Products",      unlisted,     true)}
-        ${row("Created Last 7 Days",    createdLast7Days)}
-        ${row("Updated Last 7 Days",    updatedLast7Days)}
+        <tr style="background:#f0f0f0;">
+          <th style="padding:10px; border:1px solid #ddd; text-align:left;">Metric</th>
+          <th style="padding:10px; border:1px solid #ddd; text-align:left;">Count</th>
+        </tr>
+        ${row("Active Products",      active)}
+        ${row("Draft Products",       draft)}
+        ${row("Archived Products",    archived)}
+        ${row("Unpublished Products", unpublished, true)}
+        ${row("Unlisted Products",    unlisted,    true)}
+        ${row("Created Last 7 Days",  createdLast7Days)}
+        ${row("Updated Last 7 Days",  updatedLast7Days)}
       </table>
     </div>
 
-    <!-- MISSING DATA -->
+    <!-- MISSING DATA SUMMARY -->
     <div style="background:#fff; padding:20px; margin-top:10px; border-radius:8px;">
-      <h3 style="margin-top:0;">⚠️ Missing Data (products affected)</h3>
+      <h3 style="margin-top:0;">⚠️ Missing Data — Summary</h3>
       <table width="100%" style="border-collapse:collapse;">
-        <tr style="background:#f0f0f0;"><th style="padding:10px; border:1px solid #ddd; text-align:left;">Issue</th><th style="padding:10px; border:1px solid #ddd; text-align:left;">Products</th></tr>
+        <tr style="background:#f0f0f0;">
+          <th style="padding:10px; border:1px solid #ddd; text-align:left;">Issue</th>
+          <th style="padding:10px; border:1px solid #ddd; text-align:left;">Products Affected</th>
+        </tr>
         ${row("Missing Barcode",        missingBarcode,     true)}
         ${row("Missing SKU",            missingSKU,         true)}
         ${row("Missing Weight",         missingWeight,      true)}
@@ -301,12 +318,27 @@ async function sendReport() {
 
     <!-- INVENTORY & DUPLICATES -->
     <div style="background:#fff; padding:20px; margin-top:10px; border-radius:8px;">
-      <h3 style="margin-top:0;">🔍 Inventory & Duplicates</h3>
+      <h3 style="margin-top:0;">🔍 Inventory &amp; Duplicates</h3>
       <table width="100%" style="border-collapse:collapse;">
-        <tr style="background:#f0f0f0;"><th style="padding:10px; border:1px solid #ddd; text-align:left;">Issue</th><th style="padding:10px; border:1px solid #ddd; text-align:left;">Count</th></tr>
-        ${row("Zero Inventory",         zeroInventory,      true)}
-        ${row("Duplicate SKUs",         duplicateSKU,       true)}
-        ${row("Duplicate Barcodes",     duplicateBarcode,   true)}
+        <tr style="background:#f0f0f0;">
+          <th style="padding:10px; border:1px solid #ddd; text-align:left;">Issue</th>
+          <th style="padding:10px; border:1px solid #ddd; text-align:left;">Count</th>
+        </tr>
+        ${row("Zero Inventory",     zeroInventory,     true)}
+        ${row("Duplicate SKUs",     duplicateSKU,      true)}
+        ${row("Duplicate Barcodes", duplicateBarcode,  true)}
+      </table>
+    </div>
+
+    <!-- PRODUCT DETAIL TABLE -->
+    <div style="background:#fff; padding:20px; margin-top:10px; border-radius:8px;">
+      <h3 style="margin-top:0;">📋 Products with Missing Information (${productRows.length} products)</h3>
+      <table width="100%" style="border-collapse:collapse;">
+        <tr style="background:#f0f0f0;">
+          <th style="padding:10px; border:1px solid #ddd; text-align:left; width:35%;">Product Name</th>
+          <th style="padding:10px; border:1px solid #ddd; text-align:left;">Missing Fields</th>
+        </tr>
+        ${detailRows}
       </table>
     </div>
 
@@ -325,11 +357,11 @@ async function sendReport() {
   await transporter.sendMail({
     from: EMAIL_USER,
     to: REPORT_RECIPIENT,
-    subject: "📊 Shopify Product Health Audit Report",
+    subject: `📊 Shopify Product Health Audit — ${productRows.length} Products Need Attention`,
     html,
   });
 
-  console.log("✅ Audit Email Sent Successfully");
+  console.log(`✅ Audit Email Sent — ${productRows.length} products flagged`);
 }
 
 sendReport().catch(console.error);
