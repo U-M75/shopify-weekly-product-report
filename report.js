@@ -4,25 +4,15 @@ const SHOP = process.env.SHOPIFY_STORE;
 const TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
 const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL;
 
-/**
- * Extract numeric ID from Shopify GID
- * e.g. "gid://shopify/Product/1234567890" → "1234567890"
- */
 function extractId(gid) {
   return gid ? gid.split("/").pop() : null;
 }
 
-/**
- * Build Shopify admin product URL
- */
 function adminLink(gid) {
   const id = extractId(gid);
   return `https://${SHOP}/admin/products/${id}`;
 }
 
-/**
- * ✅ GET ALL PRODUCTS (FULL DATA FOR AUDIT)
- */
 async function getProducts() {
   let products = [];
   let hasNextPage = true;
@@ -120,9 +110,6 @@ async function getProducts() {
   return products;
 }
 
-/**
- * 📤 SEND TO SLACK
- */
 async function sendToSlack(payload) {
   await axios.post(SLACK_WEBHOOK_URL, payload, {
     headers: { "Content-Type": "application/json" },
@@ -130,15 +117,69 @@ async function sendToSlack(payload) {
 }
 
 /**
- * 📊 BUILD & SEND AUDIT REPORT
+ * Slack mein ek section block ki max ~3000 char limit hai.
+ * Yeh function rows ko chunks mein split karta hai aur
+ * har chunk ek alag message ke tor pe bhejta hai.
  */
+async function sendProductListToSlack(headerText, rows, fieldKey) {
+  if (rows.length === 0) {
+    await sendToSlack({
+      blocks: [
+        {
+          type: "section",
+          text: { type: "mrkdwn", text: `*${headerText}*\n_✅ None_` },
+        },
+      ],
+    });
+    return;
+  }
+
+  // Chunk size: 15 products per message (safe for char limits)
+  const CHUNK_SIZE = 15;
+  const chunks = [];
+  for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
+    chunks.push(rows.slice(i, i + CHUNK_SIZE));
+  }
+
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
+    const isFirst = i === 0;
+    const partLabel = chunks.length > 1 ? ` (Part ${i + 1}/${chunks.length})` : "";
+
+    const lines = chunk.map((p) => {
+      const fields = (p[fieldKey] || []).join(", ");
+      return `• <${p.link}|${p.title}>\n  ↳ \`${fields}\``;
+    });
+
+    const titleLine = isFirst
+      ? `*${headerText}* — ${rows.length} products${partLabel}`
+      : `*${headerText}* ${partLabel}`;
+
+    await sendToSlack({
+      blocks: [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: `${titleLine}\n\n${lines.join("\n")}`,
+          },
+        },
+      ],
+    });
+
+    // Small delay to avoid Slack rate limits
+    if (i < chunks.length - 1) {
+      await new Promise((res) => setTimeout(res, 500));
+    }
+  }
+}
+
 async function sendReport() {
   const products = await getProducts();
 
   const sevenDaysAgo = new Date();
   sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
 
-  // ── Counters ───────────────────────────────────────────────
   let active = 0, draft = 0, archived = 0, unpublished = 0, unlisted = 0;
   let createdLast7Days = 0, updatedLast7Days = 0;
 
@@ -161,7 +202,6 @@ async function sendReport() {
     if (new Date(product.createdAt) >= sevenDaysAgo) createdLast7Days++;
     if (new Date(product.updatedAt) >= sevenDaysAgo) updatedLast7Days++;
 
-    // Channel checks
     const pubs = product.resourcePublicationsV2?.edges || [];
     const getChannel = (kw) =>
       pubs.find((e) => e.node.publication?.name?.toLowerCase().includes(kw));
@@ -179,9 +219,9 @@ async function sendReport() {
     const noPOS          = !posPub         || !posPub.node.isPublished;
     const publishedCount = pubs.filter((e) => e.node.isPublished).length;
 
-    if (isActive && noOnlineStore)       missingOnlineStore++;
-    if (isActive && noWholesale)         missingWholesale++;
-    if (isActive && noPOS)               missingPOS++;
+    if (isActive && noOnlineStore)        missingOnlineStore++;
+    if (isActive && noWholesale)          missingWholesale++;
+    if (isActive && noPOS)                missingPOS++;
     if (isActive && publishedCount === 0) notPublishedAnywhere++;
     if (!isActive && publishedCount > 0)  channelConflict++;
 
@@ -200,7 +240,6 @@ async function sendReport() {
       });
     }
 
-    // Missing checks
     const noImage       = !product.images?.edges?.length;
     const noTags        = !product.tags || product.tags.length === 0;
     const noCollections = !product.collections?.edges?.length;
@@ -282,27 +321,12 @@ async function sendReport() {
     weekday: "long", year: "numeric", month: "long", day: "numeric",
   });
 
-  // ── Slack helpers ──────────────────────────────────────────
-
   const stat = (emoji, label, value, warn = false) =>
     `${emoji} *${label}:* ${warn && value > 0 ? `*${value}* ⚠️` : value}`;
 
-  // Product list with clickable admin link
-  const productList = (rows, fieldKey) => {
-    if (rows.length === 0) return "_✅ None_";
-    const lines = rows.slice(0, 20).map((p) => {
-      const fields = (p[fieldKey] || []).join(", ");
-      return `• <${p.link}|${p.title}> — \`${fields}\``;
-    });
-    if (rows.length > 20) lines.push(`_...and ${rows.length - 20} more_`);
-    return lines.join("\n");
-  };
-
-  // ── Slack Block Kit payload ────────────────────────────────
-  const payload = {
+  // ── MESSAGE 1: Header + Summary ───────────────────────────
+  await sendToSlack({
     blocks: [
-
-      // HEADER
       {
         type: "header",
         text: { type: "plain_text", text: "📊 Shopify Product Health Audit", emoji: true },
@@ -316,7 +340,6 @@ async function sendReport() {
       },
       { type: "divider" },
 
-      // PRODUCT STATUS
       { type: "section", text: { type: "mrkdwn", text: "*📦 Product Status*" } },
       {
         type: "section",
@@ -332,26 +355,24 @@ async function sendReport() {
       },
       { type: "divider" },
 
-      // MISSING DATA
       { type: "section", text: { type: "mrkdwn", text: "*⚠️ Missing Data*" } },
       {
         type: "section",
         fields: [
-          { type: "mrkdwn", text: stat("🔖", "Barcode",       missingBarcode,     true) },
-          { type: "mrkdwn", text: stat("🏷️", "SKU",          missingSKU,         true) },
-          { type: "mrkdwn", text: stat("⚖️", "Weight",        missingWeight,      true) },
-          { type: "mrkdwn", text: stat("📐", "Size",           missingSize,        true) },
-          { type: "mrkdwn", text: stat("🖼️", "Image",         missingImage,       true) },
-          { type: "mrkdwn", text: stat("💰", "Price",          missingPrice,       true) },
-          { type: "mrkdwn", text: stat("🧾", "Cost",           missingCost,        true) },
-          { type: "mrkdwn", text: stat("🏷️", "Tags",          missingTags,        true) },
-          { type: "mrkdwn", text: stat("📁", "Collections",    missingCollections, true) },
-          { type: "mrkdwn", text: stat("🌐", "HS Code",        missingHSCode,      true) },
+          { type: "mrkdwn", text: stat("🔖", "Barcode",      missingBarcode,     true) },
+          { type: "mrkdwn", text: stat("🏷️", "SKU",         missingSKU,         true) },
+          { type: "mrkdwn", text: stat("⚖️", "Weight",       missingWeight,      true) },
+          { type: "mrkdwn", text: stat("📐", "Size",          missingSize,        true) },
+          { type: "mrkdwn", text: stat("🖼️", "Image",        missingImage,       true) },
+          { type: "mrkdwn", text: stat("💰", "Price",         missingPrice,       true) },
+          { type: "mrkdwn", text: stat("🧾", "Cost",          missingCost,        true) },
+          { type: "mrkdwn", text: stat("🏷️", "Tags",         missingTags,        true) },
+          { type: "mrkdwn", text: stat("📁", "Collections",   missingCollections, true) },
+          { type: "mrkdwn", text: stat("🌐", "HS Code",       missingHSCode,      true) },
         ],
       },
       { type: "divider" },
 
-      // INVENTORY & DUPLICATES
       { type: "section", text: { type: "mrkdwn", text: "*🔍 Inventory & Duplicates*" } },
       {
         type: "section",
@@ -363,7 +384,6 @@ async function sendReport() {
       },
       { type: "divider" },
 
-      // SALES CHANNEL AUDIT
       { type: "section", text: { type: "mrkdwn", text: "*📡 Sales Channel / Distribution Audit*" } },
       {
         type: "section",
@@ -375,29 +395,33 @@ async function sendReport() {
           { type: "mrkdwn", text: stat("⚡", "Channel Conflicts",        channelConflict,      true) },
         ],
       },
-      { type: "divider" },
+    ],
+  });
 
-      // PRODUCT DETAIL — MISSING DATA
-      {
-        type: "section",
-        text: {
-          type: "mrkdwn",
-          text: `*📋 Products with Missing Data* (${productMissingRows.length} products)\n\n${productList(productMissingRows, "missing")}`,
-        },
-      },
-      { type: "divider" },
+  await new Promise((res) => setTimeout(res, 500));
 
-      // PRODUCT DETAIL — CHANNEL ISSUES
-      {
-        type: "section",
-        text: {
-          type: "mrkdwn",
-          text: `*📡 Products with Channel Issues* (${productChannelRows.length} products)\n\n${productList(productChannelRows, "issues")}`,
-        },
-      },
-      { type: "divider" },
+  // ── MESSAGES 2+: Missing Data product list (chunked) ──────
+  await sendProductListToSlack(
+    "📋 Products with Missing Data",
+    productMissingRows,
+    "missing"
+  );
 
-      // FOOTER
+  await new Promise((res) => setTimeout(res, 500));
+
+  // ── MESSAGES N+: Channel Issues product list (chunked) ────
+  await sendProductListToSlack(
+    "📡 Products with Channel Issues",
+    productChannelRows,
+    "issues"
+  );
+
+  await new Promise((res) => setTimeout(res, 500));
+
+  // ── FINAL: Footer ─────────────────────────────────────────
+  await sendToSlack({
+    blocks: [
+      { type: "divider" },
       {
         type: "context",
         elements: [{
@@ -406,9 +430,8 @@ async function sendReport() {
         }],
       },
     ],
-  };
+  });
 
-  await sendToSlack(payload);
   console.log(`✅ Slack report sent — ${totalFlagged} products flagged`);
 }
 
