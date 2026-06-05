@@ -359,7 +359,7 @@ async function sendReport() {
       {
         type: "section",
         fields: [
-          { type: "mrkdwn", text: stat("🔖", "Barcode",      missingBarcode,     true) },
+          { type: "mrkdwn", text: stat("🔖", "Barcode",      missingBarcode) },
           { type: "mrkdwn", text: stat("🏷️", "SKU",         missingSKU,         true) },
           { type: "mrkdwn", text: stat("⚖️", "Weight",       missingWeight,      true) },
           { type: "mrkdwn", text: stat("📐", "Size",          missingSize,        true) },
