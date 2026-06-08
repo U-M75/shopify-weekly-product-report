@@ -1,16 +1,17 @@
 const axios = require("axios");
 
-const SHOP = process.env.SHOPIFY_STORE;
-const TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
+const SHOP              = process.env.SHOPIFY_STORE;
+const TOKEN             = process.env.SHOPIFY_ACCESS_TOKEN;
 const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL;
 
-// ── Required checks for health score (10 total) ────────────
+// ── Required checks for health score (10 total) ──────────────────────────────
 const REQUIRED_CHECKS = [
   "SKU", "Barcode", "Weight", "Size", "Media",
   "Price", "Cost", "Tags", "Collections", "Sales Channels",
 ];
 const TOTAL_CHECKS = REQUIRED_CHECKS.length;
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
 function extractId(gid) {
   return gid ? gid.split("/").pop() : null;
 }
@@ -20,42 +21,39 @@ function adminLink(gid) {
   return `https://${SHOP}/admin/products/${id}`;
 }
 
+function fmtDate(iso) {
+  if (!iso) return "—";
+  return new Date(iso).toLocaleDateString("en-GB", {
+    day: "2-digit", month: "short", year: "numeric",
+  });
+}
+
+function healthLabel(score) {
+  if (score >= 80) return "GOOD";
+  if (score >= 50) return "FAIR";
+  return "POOR";
+}
+
+// ── Fetch all products via paginated GraphQL ──────────────────────────────────
 async function getProducts() {
-  let products = [];
+  let products    = [];
   let hasNextPage = true;
-  let cursor = null;
+  let cursor      = null;
 
   while (hasNextPage) {
-    const query = `
-    {
+    const query = `{
       products(first: 250 ${cursor ? `, after: "${cursor}"` : ""}) {
         pageInfo { hasNextPage }
         edges {
           cursor
           node {
-            id
-            title
-            status
-            createdAt
-            updatedAt
-            publishedAt
-            tags
-            totalInventory
-
-            images(first: 1) {
-              edges { node { id } }
-            }
-
-            collections(first: 5) {
-              edges { node { id title } }
-            }
-
+            id title status createdAt updatedAt publishedAt tags totalInventory
+            images(first: 1)       { edges { node { id } } }
+            collections(first: 5)  { edges { node { id title } } }
             variants(first: 100) {
               edges {
                 node {
-                  sku
-                  barcode
-                  price
+                  sku barcode price
                   selectedOptions { name value }
                   inventoryQuantity
                   inventoryItem {
@@ -66,14 +64,8 @@ async function getProducts() {
                 }
               }
             }
-
             resourcePublicationsV2(first: 10) {
-              edges {
-                node {
-                  isPublished
-                  publication { name }
-                }
-              }
+              edges { node { isPublished publication { name } } }
             }
           }
         }
@@ -83,54 +75,45 @@ async function getProducts() {
     const response = await axios.post(
       `https://${SHOP}/admin/api/2025-10/graphql.json`,
       { query },
-      {
-        headers: {
-          "X-Shopify-Access-Token": TOKEN,
-          "Content-Type": "application/json",
-        },
-      }
+      { headers: { "X-Shopify-Access-Token": TOKEN, "Content-Type": "application/json" } }
     );
 
     const responseData = response.data;
 
     if (responseData.errors) {
-      console.log("❌ Shopify GraphQL Errors:");
-      console.log(JSON.stringify(responseData.errors, null, 2));
+      console.error("Shopify GraphQL Errors:", JSON.stringify(responseData.errors, null, 2));
       throw new Error("GraphQL query failed");
     }
-
-    if (!responseData.data || !responseData.data.products) {
-      console.log("❌ Invalid API Response:");
-      console.log(JSON.stringify(responseData, null, 2));
+    if (!responseData.data?.products) {
+      console.error("Invalid API Response:", JSON.stringify(responseData, null, 2));
       throw new Error("Products data not found");
     }
 
     const result = responseData.data.products;
-    products.push(...result.edges.map((edge) => edge.node));
-
+    products.push(...result.edges.map((e) => e.node));
     hasNextPage = result.pageInfo.hasNextPage;
-    if (hasNextPage && result.edges.length > 0) {
+    if (hasNextPage && result.edges.length > 0)
       cursor = result.edges[result.edges.length - 1].cursor;
-    }
   }
 
   return products;
 }
 
+// ── Slack sender ──────────────────────────────────────────────────────────────
 async function sendToSlack(payload) {
   await axios.post(SLACK_WEBHOOK_URL, payload, {
     headers: { "Content-Type": "application/json" },
   });
 }
 
-/**
- * Calculate health score for a single product.
- * Returns { passed, total, score, missing[] }
- * Required checks: SKU, Barcode, Weight, Size, Media, Price, Cost, Tags, Collections, Sales Channels
- */
+async function delay(ms) {
+  return new Promise((res) => setTimeout(res, ms));
+}
+
+// ── Health score for a single product ────────────────────────────────────────
 function calcHealthScore(product) {
   const variants = product.variants?.edges || [];
-  const pubs = product.resourcePublicationsV2?.edges || [];
+  const pubs     = product.resourcePublicationsV2?.edges || [];
 
   let noSKU = false, noBarcode = false, noWeight = false;
   let noPrice = false, noCost = false, noSize = false;
@@ -140,36 +123,25 @@ function calcHealthScore(product) {
     if (!v.barcode || v.barcode.trim() === "")   noBarcode = true;
     if (!v.price   || parseFloat(v.price) === 0) noPrice   = true;
 
-    const weightVal = v.inventoryItem?.measurement?.weight?.value;
-    if (!weightVal || weightVal === 0)           noWeight  = true;
+    const wt = v.inventoryItem?.measurement?.weight?.value;
+    if (!wt || wt === 0)                         noWeight  = true;
 
-    const costVal = v.inventoryItem?.unitCost?.amount;
-    if (!costVal || parseFloat(costVal) === 0)   noCost    = true;
+    const ct = v.inventoryItem?.unitCost?.amount;
+    if (!ct || parseFloat(ct) === 0)             noCost    = true;
 
-    const sizeOption = v.selectedOptions?.find(
-      (o) => o.name.toLowerCase() === "size"
-    );
-    if (!sizeOption || !sizeOption.value ||
-        sizeOption.value.toLowerCase() === "default title") noSize = true;
+    const sz = v.selectedOptions?.find((o) => o.name.toLowerCase() === "size");
+    if (!sz || !sz.value || sz.value.toLowerCase() === "default title") noSize = true;
   });
 
   const noMedia       = !product.images?.edges?.length;
   const noTags        = !product.tags || product.tags.length === 0;
   const noCollections = !product.collections?.edges?.length;
-  const publishedCount = pubs.filter((e) => e.node.isPublished).length;
-  const noChannels    = publishedCount === 0;
+  const noChannels    = pubs.filter((e) => e.node.isPublished).length === 0;
 
   const failMap = {
-    "SKU":           noSKU,
-    "Barcode":       noBarcode,
-    "Weight":        noWeight,
-    "Size":          noSize,
-    "Media":         noMedia,
-    "Price":         noPrice,
-    "Cost":          noCost,
-    "Tags":          noTags,
-    "Collections":   noCollections,
-    "Sales Channels": noChannels,
+    "SKU": noSKU, "Barcode": noBarcode, "Weight": noWeight, "Size": noSize,
+    "Media": noMedia, "Price": noPrice, "Cost": noCost, "Tags": noTags,
+    "Collections": noCollections, "Sales Channels": noChannels,
   };
 
   const missing = REQUIRED_CHECKS.filter((k) => failMap[k]);
@@ -179,29 +151,122 @@ function calcHealthScore(product) {
   return { passed, total: TOTAL_CHECKS, score, missing };
 }
 
-async function sendReport() {
-  const products = await getProducts();
+// ── Build full audit row for each product ─────────────────────────────────────
+function buildAuditRow(product) {
+  const variants  = product.variants?.edges || [];
+  const pubs      = product.resourcePublicationsV2?.edges || [];
+  const health    = calcHealthScore(product);
 
+  // Aggregate variant fields (first non-empty value wins for display)
+  let sku = "—", barcode = "—", price = "—", cost = "—", weight = "—", size = "—";
+
+  variants.forEach(({ node: v }) => {
+    if (sku     === "—" && v.sku?.trim())                           sku     = v.sku.trim();
+    if (barcode === "—" && v.barcode?.trim())                       barcode = v.barcode.trim();
+    if (price   === "—" && v.price && parseFloat(v.price) > 0)     price   = `$${parseFloat(v.price).toFixed(2)}`;
+    if (cost    === "—" && v.inventoryItem?.unitCost?.amount)       cost    = `$${parseFloat(v.inventoryItem.unitCost.amount).toFixed(2)}`;
+    const wt = v.inventoryItem?.measurement?.weight;
+    if (weight  === "—" && wt?.value && wt.value > 0)              weight  = `${wt.value} ${wt.unit}`;
+    const sz = v.selectedOptions?.find((o) => o.name.toLowerCase() === "size");
+    if (size    === "—" && sz?.value && sz.value.toLowerCase() !== "default title") size = sz.value;
+  });
+
+  const channels     = pubs.filter((e) => e.node.isPublished).map((e) => e.node.publication.name);
+  const collections  = product.collections?.edges?.map((e) => e.node.title) || [];
+  const hasMedia     = !!(product.images?.edges?.length);
+  const hasTags      = !!(product.tags?.length);
+
+  return {
+    id:           extractId(product.id),
+    title:        product.title,
+    url:          adminLink(product.id),
+    status:       product.status,
+    sku,
+    barcode,
+    price,
+    cost,
+    weight,
+    size,
+    media:        hasMedia ? "Yes" : "No",
+    tags:         hasTags  ? product.tags.slice(0, 3).join(", ") + (product.tags.length > 3 ? "…" : "") : "—",
+    collections:  collections.length ? collections.join(", ") : "—",
+    channels:     channels.length    ? channels.join(", ")    : "—",
+    missing:      health.missing.length ? health.missing.join(", ") : "—",
+    inventory:    product.totalInventory ?? 0,
+    healthScore:  health.score,
+    healthLabel:  healthLabel(health.score),
+    createdAt:    fmtDate(product.createdAt),
+    updatedAt:    fmtDate(product.updatedAt),
+  };
+}
+
+// ── Send audit table in chunks (5 rows per message) ───────────────────────────
+async function sendAuditTable(rows) {
+  if (rows.length === 0) return;
+
+  const CHUNK = 5;
+  const total = rows.length;
+
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    const chunk     = rows.slice(i, i + CHUNK);
+    const partNum   = Math.floor(i / CHUNK) + 1;
+    const partTotal = Math.ceil(total / CHUNK);
+    const isFirst   = i === 0;
+
+    const lines = chunk.map((r) => {
+      return [
+        `*<${r.url}|${r.title}>*`,
+        `\`${r.status}\`  ·  Health: \`${r.healthScore}% ${r.healthLabel}\`  ·  Inventory: \`${r.inventory}\``,
+        `SKU: \`${r.sku}\`  ·  Barcode: \`${r.barcode}\`  ·  Price: \`${r.price}\`  ·  Cost: \`${r.cost}\``,
+        `Weight: \`${r.weight}\`  ·  Size: \`${r.size}\`  ·  Media: \`${r.media}\``,
+        `Tags: \`${r.tags}\`  ·  Collections: \`${r.collections}\``,
+        `Channels: \`${r.channels}\``,
+        `Missing: \`${r.missing}\``,
+        `Created: ${r.createdAt}  ·  Updated: ${r.updatedAt}  ·  ID: ${r.id}`,
+      ].join("\n");
+    });
+
+    const header = isFirst
+      ? `*Full Audit Table*  ·  ${total} products  (${partNum}/${partTotal})`
+      : `*Full Audit Table*  (${partNum}/${partTotal})`;
+
+    await sendToSlack({
+      blocks: [
+        {
+          type: "section",
+          text: { type: "mrkdwn", text: header },
+        },
+        { type: "divider" },
+        ...chunk.map((_, idx) => ({
+          type: "section",
+          text: { type: "mrkdwn", text: lines[idx] },
+        })),
+      ],
+    });
+
+    if (i + CHUNK < rows.length) await delay(600);
+  }
+}
+
+// ── Main report ───────────────────────────────────────────────────────────────
+async function sendReport() {
+  const products     = await getProducts();
   const sevenDaysAgo = new Date();
   sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
 
+  // Counters
   let active = 0, draft = 0, archived = 0, unpublished = 0, unlisted = 0;
   let createdLast7Days = 0, updatedLast7Days = 0;
-
-  let missingImage = 0, missingTags = 0, missingCollections = 0;
-  let missingSKU = 0, missingBarcode = 0, missingWeight = 0;
-  let missingPrice = 0, missingCost = 0, missingSize = 0, missingHSCode = 0;
+  let missingSKU = 0, missingBarcode = 0, missingWeight = 0, missingSize = 0;
+  let missingImage = 0, missingPrice = 0, missingCost = 0;
+  let missingTags = 0, missingCollections = 0, missingHSCode = 0;
   let zeroInventory = 0;
   let skuMap = {}, barcodeMap = {};
-
   let missingOnlineStore = 0, missingWholesale = 0, missingPOS = 0;
   let notPublishedAnywhere = 0, channelConflict = 0;
+  let totalPassedChecks = 0, totalPossibleChecks = 0;
 
-  // For catalog health score
-  let totalPassedChecks = 0;
-  let totalPossibleChecks = 0;
-
-  // For priority products (active only)
+  const auditRows          = [];
   const activeProductScores = [];
 
   products.forEach((product) => {
@@ -211,31 +276,26 @@ async function sendReport() {
     if (new Date(product.createdAt) >= sevenDaysAgo) createdLast7Days++;
     if (new Date(product.updatedAt) >= sevenDaysAgo) updatedLast7Days++;
 
-    const pubs = product.resourcePublicationsV2?.edges || [];
+    const pubs      = product.resourcePublicationsV2?.edges || [];
     const getChannel = (kw) =>
       pubs.find((e) => e.node.publication?.name?.toLowerCase().includes(kw));
 
-    const onlineStorePub = getChannel("online store");
-    const wholesalePub   = getChannel("wholesale");
-    const posPub         = getChannel("point of sale");
+    const onlineStorePub  = getChannel("online store");
+    const wholesalePub    = getChannel("wholesale");
+    const posPub          = getChannel("point of sale");
+    const publishedCount  = pubs.filter((e) => e.node.isPublished).length;
+    const isActive        = product.status === "ACTIVE";
 
-    if (pubs.length === 0) unpublished++;
+    if (pubs.length === 0)                           unpublished++;
     if (onlineStorePub && !onlineStorePub.node.isPublished) unlisted++;
-
-    const isActive       = product.status === "ACTIVE";
-    const noOnlineStore  = !onlineStorePub || !onlineStorePub.node.isPublished;
-    const noWholesale    = !wholesalePub   || !wholesalePub.node.isPublished;
-    const noPOS          = !posPub         || !posPub.node.isPublished;
-    const publishedCount = pubs.filter((e) => e.node.isPublished).length;
-
-    if (isActive && noOnlineStore)        missingOnlineStore++;
-    if (isActive && noWholesale)          missingWholesale++;
-    if (isActive && noPOS)                missingPOS++;
+    if (isActive && (!onlineStorePub || !onlineStorePub.node.isPublished)) missingOnlineStore++;
+    if (isActive && (!wholesalePub   || !wholesalePub.node.isPublished))   missingWholesale++;
+    if (isActive && (!posPub         || !posPub.node.isPublished))         missingPOS++;
     if (isActive && publishedCount === 0) notPublishedAnywhere++;
     if (!isActive && publishedCount > 0)  channelConflict++;
 
     const noImage       = !product.images?.edges?.length;
-    const noTags        = !product.tags || product.tags.length === 0;
+    const noTags        = !product.tags?.length;
     const noCollections = !product.collections?.edges?.length;
     const noInventory   = (product.totalInventory || 0) === 0;
 
@@ -253,25 +313,20 @@ async function sendReport() {
       if (!v.barcode || v.barcode.trim() === "")   noBarcode = true;
       if (!v.price   || parseFloat(v.price) === 0) noPrice   = true;
 
-      const weightVal = v.inventoryItem?.measurement?.weight?.value;
-      if (!weightVal || weightVal === 0)           noWeight  = true;
+      const wt = v.inventoryItem?.measurement?.weight?.value;
+      if (!wt || wt === 0)                         noWeight  = true;
 
-      const costVal = v.inventoryItem?.unitCost?.amount;
-      if (!costVal || parseFloat(costVal) === 0)   noCost    = true;
+      const ct = v.inventoryItem?.unitCost?.amount;
+      if (!ct || parseFloat(ct) === 0)             noCost    = true;
 
-      const hsCode = v.inventoryItem?.harmonizedSystemCode;
-      if (!hsCode || hsCode.trim() === "")         noHS      = true;
+      const hs = v.inventoryItem?.harmonizedSystemCode;
+      if (!hs || hs.trim() === "")                 noHS      = true;
 
-      const sizeOption = v.selectedOptions?.find(
-        (o) => o.name.toLowerCase() === "size"
-      );
-      if (!sizeOption || !sizeOption.value ||
-          sizeOption.value.toLowerCase() === "default title") noSize = true;
+      const sz = v.selectedOptions?.find((o) => o.name.toLowerCase() === "size");
+      if (!sz || !sz.value || sz.value.toLowerCase() === "default title") noSize = true;
 
-      if (v.sku && v.sku.trim() !== "")
-        skuMap[v.sku] = (skuMap[v.sku] || 0) + 1;
-      if (v.barcode && v.barcode.trim() !== "")
-        barcodeMap[v.barcode] = (barcodeMap[v.barcode] || 0) + 1;
+      if (v.sku?.trim())     skuMap[v.sku]         = (skuMap[v.sku]         || 0) + 1;
+      if (v.barcode?.trim()) barcodeMap[v.barcode] = (barcodeMap[v.barcode] || 0) + 1;
     });
 
     if (noSKU)     missingSKU++;
@@ -282,14 +337,10 @@ async function sendReport() {
     if (noSize)    missingSize++;
     if (noHS)      missingHSCode++;
 
-    // ── Health Score calculation ───────────────────────────
     const health = calcHealthScore(product);
-
-    // Catalog score: include ALL products
     totalPassedChecks   += health.passed;
     totalPossibleChecks += health.total;
 
-    // Priority list: active products only
     if (isActive) {
       activeProductScores.push({
         title:   product.title,
@@ -298,17 +349,16 @@ async function sendReport() {
         missing: health.missing,
       });
     }
+
+    auditRows.push(buildAuditRow(product));
   });
 
-  const duplicateSKU     = Object.values(skuMap).filter((c) => c > 1).length;
-  const duplicateBarcode = Object.values(barcodeMap).filter((c) => c > 1).length;
-
-  // ── Catalog Health Score ───────────────────────────────────
-  const catalogHealthScore = totalPossibleChecks > 0
+  const duplicateSKU        = Object.values(skuMap).filter((c) => c > 1).length;
+  const duplicateBarcode    = Object.values(barcodeMap).filter((c) => c > 1).length;
+  const catalogHealthScore  = totalPossibleChecks > 0
     ? Math.round((totalPassedChecks / totalPossibleChecks) * 100)
     : 0;
 
-  // ── Priority Products: top 10 lowest-scoring active products
   const priorityProducts = activeProductScores
     .sort((a, b) => a.score - b.score)
     .slice(0, 10);
@@ -317,129 +367,104 @@ async function sendReport() {
     weekday: "long", year: "numeric", month: "long", day: "numeric",
   });
 
-  const stat = (emoji, label, value, warn = false) =>
-    `${emoji} *${label}:* ${warn && value > 0 ? `*${value}* ⚠️` : value}`;
+  const stat = (label, value, warn = false) =>
+    `*${label}:* ${warn && value > 0 ? `*${value}* [!]` : value}`;
 
-  function healthEmoji(score) {
-    if (score >= 80) return "🟢";
-    if (score >= 50) return "🟡";
-    return "🔴";
-  }
-
-  // ── MESSAGE 1: Header + Summary ───────────────────────────
+  // ── MESSAGE 1: Header + Summary ───────────────────────────────────────────
   await sendToSlack({
     blocks: [
       {
         type: "header",
-        text: { type: "plain_text", text: "📊 Shopify Product Health Audit", emoji: true },
+        text: { type: "plain_text", text: "Shopify Product Health Audit", emoji: false },
       },
       {
         type: "context",
         elements: [{
           type: "mrkdwn",
-          text: `${reportDate}  •  *${active} active products*`,
+          text: `${reportDate}  ·  ${products.length} total products  ·  ${active} active`,
         }],
       },
       { type: "divider" },
 
-      // ── Health Scores ──────────────────────────────────────
+      // Catalog Health Score
       {
         type: "section",
-        text: { type: "mrkdwn", text: "*🏥 Catalog Health Score*" },
-      },
-      {
-        type: "section",
-        fields: [
-          {
-            type: "mrkdwn",
-            text: `${healthEmoji(catalogHealthScore)} *Overall Catalog:* ${catalogHealthScore}%`,
-          },
-          {
-            type: "mrkdwn",
-            text: `📋 *Based on:* ${TOTAL_CHECKS} required checks per product`,
-          },
-        ],
-      },
-      {
-        type: "context",
-        elements: [{
+        text: {
           type: "mrkdwn",
-          text: `Required checks: ${REQUIRED_CHECKS.join(" · ")}`,
-        }],
+          text: `*Catalog Health Score*\n\`${catalogHealthScore}%  —  ${healthLabel(catalogHealthScore)}\`\n_Based on ${TOTAL_CHECKS} required checks per product: ${REQUIRED_CHECKS.join(", ")}_`,
+        },
       },
       { type: "divider" },
 
-      // ── Product Status ─────────────────────────────────────
-      { type: "section", text: { type: "mrkdwn", text: "*📦 Product Status*" } },
+      // Product Status
+      { type: "section", text: { type: "mrkdwn", text: "*Product Status*" } },
       {
         type: "section",
         fields: [
-          { type: "mrkdwn", text: stat("✅", "Active",           active) },
-          { type: "mrkdwn", text: stat("📝", "Draft",            draft,        true) },
-          { type: "mrkdwn", text: stat("🗃️", "Archived",        archived) },
-          { type: "mrkdwn", text: stat("👁️", "Unpublished",      unpublished,  true) },
-          { type: "mrkdwn", text: stat("🚫", "Unlisted",         unlisted,     true) },
-          { type: "mrkdwn", text: stat("🆕", "Created (7 days)", createdLast7Days) },
-          { type: "mrkdwn", text: stat("🔄", "Updated (7 days)", updatedLast7Days) },
+          { type: "mrkdwn", text: stat("Active",           active) },
+          { type: "mrkdwn", text: stat("Draft",            draft,           true) },
+          { type: "mrkdwn", text: stat("Archived",         archived) },
+          { type: "mrkdwn", text: stat("Unpublished",      unpublished,     true) },
+          { type: "mrkdwn", text: stat("Unlisted",         unlisted,        true) },
+          { type: "mrkdwn", text: stat("Created (7 days)", createdLast7Days) },
+          { type: "mrkdwn", text: stat("Updated (7 days)", updatedLast7Days) },
         ],
       },
       { type: "divider" },
 
-      // ── Missing Data ───────────────────────────────────────
-      { type: "section", text: { type: "mrkdwn", text: "*⚠️ Missing Data (Failed Checks)*" } },
+      // Missing Data
+      { type: "section", text: { type: "mrkdwn", text: "*Missing Data — Failed Checks*" } },
       {
         type: "section",
         fields: [
-          { type: "mrkdwn", text: stat("🔖", "Barcode",      missingBarcode) },
-          { type: "mrkdwn", text: stat("🏷️", "SKU",          missingSKU) },
-          { type: "mrkdwn", text: stat("⚖️", "Weight",       missingWeight) },
-          { type: "mrkdwn", text: stat("📐", "Size",          missingSize) },
-          { type: "mrkdwn", text: stat("🖼️", "Media",        missingImage) },
-          { type: "mrkdwn", text: stat("💰", "Price",         missingPrice) },
-          { type: "mrkdwn", text: stat("🧾", "Cost",          missingCost) },
-          { type: "mrkdwn", text: stat("🏷️", "Tags",         missingTags) },
-          { type: "mrkdwn", text: stat("📁", "Collections",   missingCollections) },
-          { type: "mrkdwn", text: stat("🌐", "HS Code",       missingHSCode) },
+          { type: "mrkdwn", text: stat("Barcode",     missingBarcode) },
+          { type: "mrkdwn", text: stat("SKU",         missingSKU) },
+          { type: "mrkdwn", text: stat("Weight",      missingWeight) },
+          { type: "mrkdwn", text: stat("Size",        missingSize) },
+          { type: "mrkdwn", text: stat("Media",       missingImage) },
+          { type: "mrkdwn", text: stat("Price",       missingPrice) },
+          { type: "mrkdwn", text: stat("Cost",        missingCost) },
+          { type: "mrkdwn", text: stat("Tags",        missingTags) },
+          { type: "mrkdwn", text: stat("Collections", missingCollections) },
+          { type: "mrkdwn", text: stat("HS Code",     missingHSCode) },
         ],
       },
       { type: "divider" },
 
-      // ── Inventory & Duplicates ─────────────────────────────
-      { type: "section", text: { type: "mrkdwn", text: "*🔍 Inventory & Duplicates*" } },
+      // Inventory & Duplicates
+      { type: "section", text: { type: "mrkdwn", text: "*Inventory & Duplicates*" } },
       {
         type: "section",
         fields: [
-          { type: "mrkdwn", text: stat("📦", "Zero Inventory",      zeroInventory) },
-          { type: "mrkdwn", text: stat("♻️", "Duplicate SKUs",     duplicateSKU) },
-          { type: "mrkdwn", text: stat("♻️", "Duplicate Barcodes", duplicateBarcode) },
+          { type: "mrkdwn", text: stat("Zero Inventory",    zeroInventory) },
+          { type: "mrkdwn", text: stat("Duplicate SKUs",    duplicateSKU) },
+          { type: "mrkdwn", text: stat("Duplicate Barcodes",duplicateBarcode) },
         ],
       },
       { type: "divider" },
 
-      // ── Sales Channel Audit ────────────────────────────────
-      { type: "section", text: { type: "mrkdwn", text: "*📡 Sales Channel Audit*" } },
+      // Sales Channel Audit
+      { type: "section", text: { type: "mrkdwn", text: "*Sales Channel Audit*" } },
       {
         type: "section",
         fields: [
-          { type: "mrkdwn", text: stat("🛍️", "Missing Online Store",  missingOnlineStore) },
-          { type: "mrkdwn", text: stat("🤝", "Missing Wholesale",      missingWholesale) },
-          { type: "mrkdwn", text: stat("🏪", "Missing POS",            missingPOS) },
-          { type: "mrkdwn", text: stat("🚫", "Not Published Anywhere", notPublishedAnywhere) },
-          { type: "mrkdwn", text: stat("⚡", "Channel Conflicts",      channelConflict) },
+          { type: "mrkdwn", text: stat("Missing Online Store",   missingOnlineStore) },
+          { type: "mrkdwn", text: stat("Missing Wholesale",      missingWholesale) },
+          { type: "mrkdwn", text: stat("Missing POS",            missingPOS) },
+          { type: "mrkdwn", text: stat("Not Published Anywhere", notPublishedAnywhere) },
+          { type: "mrkdwn", text: stat("Channel Conflicts",      channelConflict) },
         ],
       },
     ],
   });
 
-  await new Promise((res) => setTimeout(res, 500));
+  await delay(500);
 
-  // ── MESSAGE 2: Priority Products (top 10 lowest health scores) ──
+  // ── MESSAGE 2: Priority Products ─────────────────────────────────────────
   if (priorityProducts.length > 0) {
     const lines = priorityProducts.map((p, i) => {
-      const rank    = i + 1;
-      const emoji   = healthEmoji(p.score);
       const missing = p.missing.length > 0 ? p.missing.join(", ") : "—";
-      return `${rank}. ${emoji} <${p.link}|${p.title}>\n   Score: *${p.score}%* · Missing: \`${missing}\``;
+      return `${i + 1}. <${p.link}|${p.title}>\n   Score: \`${p.score}%  ${healthLabel(p.score)}\`  ·  Missing: \`${missing}\``;
     });
 
     await sendToSlack({
@@ -448,23 +473,26 @@ async function sendReport() {
           type: "section",
           text: {
             type: "mrkdwn",
-            text: `*🚨 Priority Products — Lowest Health Scores (Top ${priorityProducts.length})*\n_Active products needing immediate attention_`,
+            text: `*Priority Products — Lowest Health Scores (Top ${priorityProducts.length})*\n_Active products needing immediate attention_`,
           },
         },
+        { type: "divider" },
         {
           type: "section",
-          text: {
-            type: "mrkdwn",
-            text: lines.join("\n\n"),
-          },
+          text: { type: "mrkdwn", text: lines.join("\n\n") },
         },
       ],
     });
   }
 
-  await new Promise((res) => setTimeout(res, 500));
+  await delay(500);
 
-  // ── FINAL: Footer ──────────────────────────────────────────
+  // ── MESSAGES 3+: Full Audit Table (all 17 fields, chunked) ───────────────
+  await sendAuditTable(auditRows);
+
+  await delay(500);
+
+  // ── Final: Footer ─────────────────────────────────────────────────────────
   await sendToSlack({
     blocks: [
       { type: "divider" },
@@ -472,13 +500,13 @@ async function sendReport() {
         type: "context",
         elements: [{
           type: "mrkdwn",
-          text: `🤖 Auto-generated Shopify Audit Report  •  ${reportDate}  •  Catalog Health: ${healthEmoji(catalogHealthScore)} ${catalogHealthScore}%`,
+          text: `Auto-generated Shopify Audit  ·  ${reportDate}  ·  Catalog Health: ${catalogHealthScore}% ${healthLabel(catalogHealthScore)}`,
         }],
       },
     ],
   });
 
-  console.log(`✅ Slack report sent — Catalog health: ${catalogHealthScore}% — ${priorityProducts.length} priority products flagged`);
+  console.log(`Report sent — ${products.length} products — Catalog health: ${catalogHealthScore}%`);
 }
 
 sendReport().catch(console.error);
