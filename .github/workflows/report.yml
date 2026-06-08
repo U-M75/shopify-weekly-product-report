@@ -1,33 +1,23 @@
 name: Shopify Product Report
-
 on:
   workflow_dispatch:
-
   schedule:
-    - cron: '0 9 * * 1' # Every Monday 9 AM UTC
-
+    - cron: '0 12 * * 1' # Every Monday 5 PM PKT (UTC+5)
 jobs:
   report:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
-
       - name: Install dependencies
         run: npm install
-
       - name: Run Report Script
         run: node report.js
         env:
           SHOPIFY_STORE: ${{ secrets.SHOPIFY_STORE }}
           SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
-          EMAIL_USER: ${{ secrets.EMAIL_USER }}
-          EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
-          REPORT_RECIPIENT: ${{ secrets.REPORT_RECIPIENT }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
