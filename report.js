@@ -33,9 +33,9 @@ function fmtDate(iso) {
 }
 
 function healthLabel(score) {
-  if (score >= 80) return "✅ GOOD";
-  if (score >= 50) return "⚠️ FAIR";
-  return "❌ POOR";
+  if (score >= 80) return "GOOD";
+  if (score >= 50) return "FAIR";
+  return "POOR";
 }
 
 function progressBar(score, width = 10) {
@@ -180,10 +180,10 @@ function buildAuditRow(product) {
   variants.forEach(({ node: v }) => {
     if (sku     === "—" && v.sku?.trim())                           sku     = v.sku.trim();
     if (barcode === "—" && v.barcode?.trim())                       barcode = v.barcode.trim();
-    if (price   === "—" && v.price && parseFloat(v.price) > 0)     price   = `$${parseFloat(v.price).toFixed(2)}`;
-    if (cost    === "—" && v.inventoryItem?.unitCost?.amount)       cost    = `$${parseFloat(v.inventoryItem.unitCost.amount).toFixed(2)}`;
+    if (price   === "—" && v.price && parseFloat(v.price) > 0)     price   = `${parseFloat(v.price).toFixed(2)}`;
+    if (cost    === "—" && v.inventoryItem?.unitCost?.amount)       cost    = `${parseFloat(v.inventoryItem.unitCost.amount).toFixed(2)}`;
     const wt = v.inventoryItem?.measurement?.weight;
-    if (weight  === "—" && wt?.value && wt.value > 0)              weight  = `${wt.value} ${wt.unit}`;
+    if (weight  === "—" && wt?.value && wt.value > 0)              weight  = `${wt.value}${wt.unit}`;
     const sz = v.selectedOptions?.find((o) => o.name.toLowerCase() === "size");
     if (size    === "—" && sz?.value && sz.value.toLowerCase() !== "default title") size = sz.value;
   });
@@ -197,18 +197,18 @@ function buildAuditRow(product) {
     id:           extractId(product.id),
     title:        product.title,
     url:          adminLink(product.id),
-    status:       product.status === "ACTIVE" ? "🟢 Active" : product.status === "DRAFT" ? "📝 Draft" : "📦 Archived",
+    status:       product.status === "ACTIVE" ? "Active" : product.status === "DRAFT" ? "Draft" : "Archived",
     sku,
     barcode,
-    price,
-    cost,
+    price:        price !== "—" ? `$${price}` : "—",
+    cost:         cost !== "—" ? `$${cost}` : "—",
     weight,
     size,
-    media:        hasMedia ? "✅ Yes" : "❌ No",
+    media:        hasMedia ? "Yes" : "No",
     tags:         hasTags  ? product.tags.slice(0, 3).join(", ") + (product.tags.length > 3 ? "…" : "") : "—",
     collections:  collections.length ? collections.join(", ") : "—",
     channels:     channels.length    ? channels.join(", ")    : "—",
-    missing:      health.missing.length ? health.missing.join(", ") : "✅ None",
+    missing:      health.missing.length ? health.missing.join(", ") : "None",
     inventory:    product.totalInventory ?? 0,
     healthScore:  health.score,
     healthLabel:  healthLabel(health.score),
@@ -219,45 +219,58 @@ function buildAuditRow(product) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-//  SEND AUDIT TABLE (CHUNKED)
+//  SEND AUDIT TABLE (MODERN TABLE FORMAT)
 // ──────────────────────────────────────────────────────────────────────────────
 async function sendAuditTable(rows) {
   if (rows.length === 0) return;
 
-  const CHUNK = 5;
+  const CHUNK = 4;
   const total = rows.length;
 
   for (let i = 0; i < rows.length; i += CHUNK) {
-    const chunk     = rows.slice(i, i + CHUNK);
-    const partNum   = Math.floor(i / CHUNK) + 1;
+    const chunk = rows.slice(i, i + CHUNK);
+    const partNum = Math.floor(i / CHUNK) + 1;
     const partTotal = Math.ceil(total / CHUNK);
-    const isFirst   = i === 0;
-
-    const lines = chunk.map((r, idx) => {
+    
+    // Build markdown table
+    let tableHeader = `| # | Product | Health | Inventory | Status |\n`;
+    tableHeader += `|---|---------|--------|-----------|--------|\n`;
+    
+    let tableRows = chunk.map((r, idx) => {
+      const num = i + idx + 1;
+      const healthDisplay = `${r.healthScore}% ${r.healthLabel}`;
+      return `| ${num} | [${r.title}](${r.url}) | ${healthDisplay} | ${r.inventory} | ${r.status} |`;
+    }).join("\n");
+    
+    let detailsSection = chunk.map((r, idx) => {
+      const num = i + idx + 1;
       return [
-        `*${idx + 1 + i}. <${r.url}|${r.title}>*`,
-        `┌─────────────────────────────────────────────────────────────`,
-        `│ ${r.progressBar} \`${r.healthScore}%\` ${r.healthLabel}  ·  Inventory: \`${r.inventory}\`  ·  Status: ${r.status}`,
-        `├─────────────────────────────────────────────────────────────`,
-        `│ 📦 SKU: \`${r.sku}\`  │  🏷️ Barcode: \`${r.barcode}\``,
-        `│ 💰 Price: \`${r.price}\`  │  💵 Cost: \`${r.cost}\``,
-        `│ ⚖️ Weight: \`${r.weight}\`  │  📐 Size: \`${r.size}\``,
-        `│ 🖼️ Media: ${r.media}  │  🏷️ Tags: \`${r.tags}\``,
-        `├─────────────────────────────────────────────────────────────`,
-        `│ 📚 Collections: \`${r.collections}\``,
-        `│ 📢 Channels: \`${r.channels}\``,
-        `│ ⚠️ Missing: \`${r.missing}\``,
-        `├─────────────────────────────────────────────────────────────`,
-        `│ 📅 Created: ${r.createdAt}  ·  Updated: ${r.updatedAt}`,
-        `│ 🆔 ID: \`${r.id}\``,
-        `└─────────────────────────────────────────────────────────────`,
+        `*Product #${num}: ${r.title}*`,
+        `\`\`\``,
+        `┌─────────────────────────────────────────────────────────────────┐`,
+        `│ ID: ${r.id.padEnd(50)}│`,
+        `├─────────────────────────────────────────────────────────────────┤`,
+        `│ SKU: ${r.sku.padEnd(20)} │ Barcode: ${r.barcode.padEnd(20)} │`,
+        `│ Price: ${r.price.padEnd(19)} │ Cost: ${r.cost.padEnd(20)} │`,
+        `│ Weight: ${r.weight.padEnd(18)} │ Size: ${r.size.padEnd(21)} │`,
+        `│ Media: ${r.media.padEnd(20)} │ Tags: ${r.tags.padEnd(21)} │`,
+        `├─────────────────────────────────────────────────────────────────┤`,
+        `│ Collections: ${r.collections.padEnd(47)}│`,
+        `│ Channels: ${r.channels.padEnd(49)}│`,
+        `│ Missing: ${r.missing.padEnd(50)}│`,
+        `├─────────────────────────────────────────────────────────────────┤`,
+        `│ Health: ${r.progressBar} ${r.healthScore}% ${r.healthLabel.padEnd(24)}│`,
+        `│ Created: ${r.createdAt.padEnd(20)} Updated: ${r.updatedAt.padEnd(20)}│`,
+        `└─────────────────────────────────────────────────────────────────┘`,
+        `\`\`\``,
+        ``
       ].join("\n");
-    });
-
-    const header = isFirst
-      ? `📊 *FULL AUDIT TABLE* · ${total} products · (${partNum}/${partTotal})`
-      : `📊 *Full Audit Table* · (${partNum}/${partTotal})`;
-
+    }).join("\n");
+    
+    const header = i === 0 
+      ? `*AUDIT REPORT · ${total} Products* (Page ${partNum}/${partTotal})`
+      : `*Audit Report* (Page ${partNum}/${partTotal})`;
+    
     await sendToSlack({
       blocks: [
         {
@@ -265,14 +278,19 @@ async function sendAuditTable(rows) {
           text: { type: "mrkdwn", text: header },
         },
         { type: "divider" },
-        ...chunk.map((_, idx) => ({
+        {
           type: "section",
-          text: { type: "mrkdwn", text: lines[idx] },
-        })),
+          text: { type: "mrkdwn", text: tableHeader + tableRows },
+        },
+        { type: "divider" },
+        {
+          type: "section",
+          text: { type: "mrkdwn", text: detailsSection },
+        },
       ],
     });
-
-    if (i + CHUNK < rows.length) await delay(600);
+    
+    if (i + CHUNK < rows.length) await delay(800);
   }
 }
 
@@ -399,7 +417,7 @@ async function sendReport() {
   });
 
   const stat = (label, value, warn = false) =>
-    `• *${label}:* ${warn && value > 0 ? `*${value}* ⚠️` : value}`;
+    `• ${label}: ${warn && value > 0 ? `${value} [!]` : value}`;
 
   // ──────────────────────────────────────────────────────────────────────────
   //  MESSAGE 1: HEADER + CATALOG SUMMARY
@@ -408,13 +426,13 @@ async function sendReport() {
     blocks: [
       {
         type: "header",
-        text: { type: "plain_text", text: "📊 Shopify Product Health Audit", emoji: true },
+        text: { type: "plain_text", text: "Shopify Product Health Audit", emoji: false },
       },
       {
         type: "context",
         elements: [{
           type: "mrkdwn",
-          text: `📅 ${reportDate}  ·  📦 ${products.length} total products  ·  🟢 ${active} active`,
+          text: `${reportDate}  |  ${products.length} Total Products  |  ${active} Active`,
         }],
       },
       { type: "divider" },
@@ -424,7 +442,7 @@ async function sendReport() {
         type: "section",
         text: {
           type: "mrkdwn",
-          text: `🎯 *CATALOG HEALTH SCORE*\n\`${progressBar(catalogHealthScore)} ${catalogHealthScore}% ${healthLabel(catalogHealthScore)}\`\n_Based on ${TOTAL_CHECKS} required checks per product_`,
+          text: `*CATALOG HEALTH SCORE*\n\`${progressBar(catalogHealthScore)} ${catalogHealthScore}% ${healthLabel(catalogHealthScore)}\`\n_Based on ${TOTAL_CHECKS} required checks per product_`,
         },
       },
       { type: "divider" },
@@ -432,18 +450,18 @@ async function sendReport() {
       // Product Status
       {
         type: "section",
-        text: { type: "mrkdwn", text: "📋 *PRODUCT STATUS*" },
+        text: { type: "mrkdwn", text: "*PRODUCT STATUS*" },
       },
       {
         type: "section",
         fields: [
-          { type: "mrkdwn", text: stat("🟢 Active",           active) },
-          { type: "mrkdwn", text: stat("📝 Draft",            draft,           true) },
-          { type: "mrkdwn", text: stat("📦 Archived",         archived) },
-          { type: "mrkdwn", text: stat("🚫 Unpublished",      unpublished,     true) },
-          { type: "mrkdwn", text: stat("👻 Unlisted",         unlisted,        true) },
-          { type: "mrkdwn", text: stat("🆕 Created (7 days)", createdLast7Days) },
-          { type: "mrkdwn", text: stat("🔄 Updated (7 days)", updatedLast7Days) },
+          { type: "mrkdwn", text: stat("Active",           active) },
+          { type: "mrkdwn", text: stat("Draft",            draft,           true) },
+          { type: "mrkdwn", text: stat("Archived",         archived) },
+          { type: "mrkdwn", text: stat("Unpublished",      unpublished,     true) },
+          { type: "mrkdwn", text: stat("Unlisted",         unlisted,        true) },
+          { type: "mrkdwn", text: stat("Created (7d)",     createdLast7Days) },
+          { type: "mrkdwn", text: stat("Updated (7d)",     updatedLast7Days) },
         ],
       },
       { type: "divider" },
@@ -451,21 +469,21 @@ async function sendReport() {
       // Missing Data
       {
         type: "section",
-        text: { type: "mrkdwn", text: "⚠️ *MISSING DATA — FAILED CHECKS*" },
+        text: { type: "mrkdwn", text: "*MISSING DATA*" },
       },
       {
         type: "section",
         fields: [
-          { type: "mrkdwn", text: stat("🏷️ Barcode",     missingBarcode) },
-          { type: "mrkdwn", text: stat("🔖 SKU",         missingSKU) },
-          { type: "mrkdwn", text: stat("⚖️ Weight",      missingWeight) },
-          { type: "mrkdwn", text: stat("📐 Size",        missingSize) },
-          { type: "mrkdwn", text: stat("🖼️ Media",       missingImage) },
-          { type: "mrkdwn", text: stat("💰 Price",       missingPrice) },
-          { type: "mrkdwn", text: stat("💵 Cost",        missingCost) },
-          { type: "mrkdwn", text: stat("🏷️ Tags",        missingTags) },
-          { type: "mrkdwn", text: stat("📚 Collections", missingCollections) },
-          { type: "mrkdwn", text: stat("🔢 HS Code",     missingHSCode) },
+          { type: "mrkdwn", text: stat("Barcode",     missingBarcode) },
+          { type: "mrkdwn", text: stat("SKU",         missingSKU) },
+          { type: "mrkdwn", text: stat("Weight",      missingWeight) },
+          { type: "mrkdwn", text: stat("Size",        missingSize) },
+          { type: "mrkdwn", text: stat("Media",       missingImage) },
+          { type: "mrkdwn", text: stat("Price",       missingPrice) },
+          { type: "mrkdwn", text: stat("Cost",        missingCost) },
+          { type: "mrkdwn", text: stat("Tags",        missingTags) },
+          { type: "mrkdwn", text: stat("Collections", missingCollections) },
+          { type: "mrkdwn", text: stat("HS Code",     missingHSCode) },
         ],
       },
       { type: "divider" },
@@ -473,14 +491,14 @@ async function sendReport() {
       // Inventory & Duplicates
       {
         type: "section",
-        text: { type: "mrkdwn", text: "📊 *INVENTORY & DUPLICATES*" },
+        text: { type: "mrkdwn", text: "*INVENTORY & DUPLICATES*" },
       },
       {
         type: "section",
         fields: [
-          { type: "mrkdwn", text: stat("📦 Zero Inventory",    zeroInventory) },
-          { type: "mrkdwn", text: stat("🔄 Duplicate SKUs",    duplicateSKU) },
-          { type: "mrkdwn", text: stat("🔄 Duplicate Barcodes",duplicateBarcode) },
+          { type: "mrkdwn", text: stat("Zero Inventory",    zeroInventory) },
+          { type: "mrkdwn", text: stat("Duplicate SKUs",    duplicateSKU) },
+          { type: "mrkdwn", text: stat("Duplicate Barcodes",duplicateBarcode) },
         ],
       },
       { type: "divider" },
@@ -488,16 +506,16 @@ async function sendReport() {
       // Sales Channel Audit
       {
         type: "section",
-        text: { type: "mrkdwn", text: "📢 *SALES CHANNEL AUDIT*" },
+        text: { type: "mrkdwn", text: "*SALES CHANNEL AUDIT*" },
       },
       {
         type: "section",
         fields: [
-          { type: "mrkdwn", text: stat("🛒 Missing Online Store",   missingOnlineStore) },
-          { type: "mrkdwn", text: stat("� wholesale Missing Wholesale",      missingWholesale) },
-          { type: "mrkdwn", text: stat("📱 Missing POS",            missingPOS) },
-          { type: "mrkdwn", text: stat("🌍 Not Published Anywhere", notPublishedAnywhere) },
-          { type: "mrkdwn", text: stat("⚠️ Channel Conflicts",      channelConflict) },
+          { type: "mrkdwn", text: stat("Missing Online Store",   missingOnlineStore) },
+          { type: "mrkdwn", text: stat("Missing Wholesale",      missingWholesale) },
+          { type: "mrkdwn", text: stat("Missing POS",            missingPOS) },
+          { type: "mrkdwn", text: stat("Not Published Anywhere", notPublishedAnywhere) },
+          { type: "mrkdwn", text: stat("Channel Conflicts",      channelConflict) },
         ],
       },
     ],
@@ -509,25 +527,27 @@ async function sendReport() {
   //  MESSAGE 2: PRIORITY PRODUCTS
   // ──────────────────────────────────────────────────────────────────────────
   if (priorityProducts.length > 0) {
-    const lines = priorityProducts.map((p, i) => {
+    let priorityTable = "| # | Product | Health Score | Missing Fields |\n";
+    priorityTable += "|---|---------|--------------|----------------|\n";
+    
+    priorityProducts.forEach((p, i) => {
       const missing = p.missing.length > 0 ? p.missing.join(", ") : "None";
-      const bar = progressBar(p.score);
-      return `${i + 1}. *<${p.link}|${p.title}>*\n   \`${bar} ${p.score}% ${healthLabel(p.score)}\`  ·  Missing: \`${missing}\``;
+      priorityTable += `| ${i + 1} | [${p.title}](${p.link}) | ${p.score}% | ${missing} |\n`;
     });
-
+    
     await sendToSlack({
       blocks: [
         {
           type: "section",
           text: {
             type: "mrkdwn",
-            text: `🚨 *PRIORITY PRODUCTS — LOWEST HEALTH SCORES* (Top ${priorityProducts.length})\n_Active products needing immediate attention_`,
+            text: `*PRIORITY PRODUCTS* · Lowest Health Scores (Top ${priorityProducts.length})\n_Active products needing immediate attention_`,
           },
         },
         { type: "divider" },
         {
           type: "section",
-          text: { type: "mrkdwn", text: lines.join("\n\n") },
+          text: { type: "mrkdwn", text: priorityTable },
         },
       ],
     });
@@ -552,13 +572,13 @@ async function sendReport() {
         type: "context",
         elements: [{
           type: "mrkdwn",
-          text: `🤖 Auto-generated Shopify Audit  ·  📅 ${reportDate}  ·  🎯 Catalog Health: ${catalogHealthScore}% ${healthLabel(catalogHealthScore)}`,
+          text: `Auto-generated Shopify Audit | ${reportDate} | Catalog Health: ${catalogHealthScore}% ${healthLabel(catalogHealthScore)}`,
         }],
       },
     ],
   });
 
-  console.log(`✅ Report sent — ${products.length} products — Catalog health: ${catalogHealthScore}%`);
+  console.log(`Report sent — ${products.length} products — Catalog health: ${catalogHealthScore}%`);
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
