@@ -4,6 +4,13 @@ const SHOP = process.env.SHOPIFY_STORE;
 const TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
 const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL;
 
+// ── Required checks for health score (10 total) ────────────
+const REQUIRED_CHECKS = [
+  "SKU", "Barcode", "Weight", "Size", "Media",
+  "Price", "Cost", "Tags", "Collections", "Sales Channels",
+];
+const TOTAL_CHECKS = REQUIRED_CHECKS.length;
+
 function extractId(gid) {
   return gid ? gid.split("/").pop() : null;
 }
@@ -117,61 +124,59 @@ async function sendToSlack(payload) {
 }
 
 /**
- * Slack mein ek section block ki max ~3000 char limit hai.
- * Yeh function rows ko chunks mein split karta hai aur
- * har chunk ek alag message ke tor pe bhejta hai.
+ * Calculate health score for a single product.
+ * Returns { passed, total, score, missing[] }
+ * Required checks: SKU, Barcode, Weight, Size, Media, Price, Cost, Tags, Collections, Sales Channels
  */
-async function sendProductListToSlack(headerText, rows, fieldKey) {
-  if (rows.length === 0) {
-    await sendToSlack({
-      blocks: [
-        {
-          type: "section",
-          text: { type: "mrkdwn", text: `*${headerText}*\n_✅ None_` },
-        },
-      ],
-    });
-    return;
-  }
+function calcHealthScore(product) {
+  const variants = product.variants?.edges || [];
+  const pubs = product.resourcePublicationsV2?.edges || [];
 
-  // Chunk size: 15 products per message (safe for char limits)
-  const CHUNK_SIZE = 15;
-  const chunks = [];
-  for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
-    chunks.push(rows.slice(i, i + CHUNK_SIZE));
-  }
+  let noSKU = false, noBarcode = false, noWeight = false;
+  let noPrice = false, noCost = false, noSize = false;
 
-  for (let i = 0; i < chunks.length; i++) {
-    const chunk = chunks[i];
-    const isFirst = i === 0;
-    const partLabel = chunks.length > 1 ? ` (Part ${i + 1}/${chunks.length})` : "";
+  variants.forEach(({ node: v }) => {
+    if (!v.sku     || v.sku.trim() === "")       noSKU     = true;
+    if (!v.barcode || v.barcode.trim() === "")   noBarcode = true;
+    if (!v.price   || parseFloat(v.price) === 0) noPrice   = true;
 
-    const lines = chunk.map((p) => {
-      const fields = (p[fieldKey] || []).join(", ");
-      return `• <${p.link}|${p.title}>\n  ↳ \`${fields}\``;
-    });
+    const weightVal = v.inventoryItem?.measurement?.weight?.value;
+    if (!weightVal || weightVal === 0)           noWeight  = true;
 
-    const titleLine = isFirst
-      ? `*${headerText}* — ${rows.length} products${partLabel}`
-      : `*${headerText}* ${partLabel}`;
+    const costVal = v.inventoryItem?.unitCost?.amount;
+    if (!costVal || parseFloat(costVal) === 0)   noCost    = true;
 
-    await sendToSlack({
-      blocks: [
-        {
-          type: "section",
-          text: {
-            type: "mrkdwn",
-            text: `${titleLine}\n\n${lines.join("\n")}`,
-          },
-        },
-      ],
-    });
+    const sizeOption = v.selectedOptions?.find(
+      (o) => o.name.toLowerCase() === "size"
+    );
+    if (!sizeOption || !sizeOption.value ||
+        sizeOption.value.toLowerCase() === "default title") noSize = true;
+  });
 
-    // Small delay to avoid Slack rate limits
-    if (i < chunks.length - 1) {
-      await new Promise((res) => setTimeout(res, 500));
-    }
-  }
+  const noMedia       = !product.images?.edges?.length;
+  const noTags        = !product.tags || product.tags.length === 0;
+  const noCollections = !product.collections?.edges?.length;
+  const publishedCount = pubs.filter((e) => e.node.isPublished).length;
+  const noChannels    = publishedCount === 0;
+
+  const failMap = {
+    "SKU":           noSKU,
+    "Barcode":       noBarcode,
+    "Weight":        noWeight,
+    "Size":          noSize,
+    "Media":         noMedia,
+    "Price":         noPrice,
+    "Cost":          noCost,
+    "Tags":          noTags,
+    "Collections":   noCollections,
+    "Sales Channels": noChannels,
+  };
+
+  const missing = REQUIRED_CHECKS.filter((k) => failMap[k]);
+  const passed  = TOTAL_CHECKS - missing.length;
+  const score   = Math.round((passed / TOTAL_CHECKS) * 100);
+
+  return { passed, total: TOTAL_CHECKS, score, missing };
 }
 
 async function sendReport() {
@@ -192,8 +197,12 @@ async function sendReport() {
   let missingOnlineStore = 0, missingWholesale = 0, missingPOS = 0;
   let notPublishedAnywhere = 0, channelConflict = 0;
 
-  const productMissingRows = [];
-  const productChannelRows = [];
+  // For catalog health score
+  let totalPassedChecks = 0;
+  let totalPossibleChecks = 0;
+
+  // For priority products (active only)
+  const activeProductScores = [];
 
   products.forEach((product) => {
     if (product.status === "ACTIVE")   active++;
@@ -224,21 +233,6 @@ async function sendReport() {
     if (isActive && noPOS)                missingPOS++;
     if (isActive && publishedCount === 0) notPublishedAnywhere++;
     if (!isActive && publishedCount > 0)  channelConflict++;
-
-    const channelIssues = [];
-    if (isActive && noOnlineStore)        channelIssues.push("No Online Store");
-    if (isActive && noWholesale)          channelIssues.push("No Wholesale");
-    if (isActive && noPOS)                channelIssues.push("No POS");
-    if (isActive && publishedCount === 0) channelIssues.push("Not Published Anywhere");
-    if (!isActive && publishedCount > 0)  channelIssues.push("Channel Conflict");
-
-    if (channelIssues.length > 0) {
-      productChannelRows.push({
-        title: product.title,
-        issues: channelIssues,
-        link: adminLink(product.id),
-      });
-    }
 
     const noImage       = !product.images?.edges?.length;
     const noTags        = !product.tags || product.tags.length === 0;
@@ -288,34 +282,36 @@ async function sendReport() {
     if (noSize)    missingSize++;
     if (noHS)      missingHSCode++;
 
-    const missing = [];
-    if (noBarcode)     missing.push("Barcode");
-    if (noSKU)         missing.push("SKU");
-    if (noWeight)      missing.push("Weight");
-    if (noSize)        missing.push("Size");
-    if (noImage)       missing.push("Image");
-    if (noPrice)       missing.push("Price");
-    if (noCost)        missing.push("Cost");
-    if (noTags)        missing.push("Tags");
-    if (noCollections) missing.push("Collection");
-    if (noHS)          missing.push("HS Code");
-    if (noInventory)   missing.push("Inventory");
+    // ── Health Score calculation ───────────────────────────
+    const health = calcHealthScore(product);
 
-    if (missing.length > 0) {
-      productMissingRows.push({
-        title: product.title,
-        missing,
-        link: adminLink(product.id),
+    // Catalog score: include ALL products
+    totalPassedChecks   += health.passed;
+    totalPossibleChecks += health.total;
+
+    // Priority list: active products only
+    if (isActive) {
+      activeProductScores.push({
+        title:   product.title,
+        link:    adminLink(product.id),
+        score:   health.score,
+        missing: health.missing,
       });
     }
   });
 
   const duplicateSKU     = Object.values(skuMap).filter((c) => c > 1).length;
   const duplicateBarcode = Object.values(barcodeMap).filter((c) => c > 1).length;
-  const totalFlagged     = new Set([
-    ...productMissingRows.map((p) => p.title),
-    ...productChannelRows.map((p) => p.title),
-  ]).size;
+
+  // ── Catalog Health Score ───────────────────────────────────
+  const catalogHealthScore = totalPossibleChecks > 0
+    ? Math.round((totalPassedChecks / totalPossibleChecks) * 100)
+    : 0;
+
+  // ── Priority Products: top 10 lowest-scoring active products
+  const priorityProducts = activeProductScores
+    .sort((a, b) => a.score - b.score)
+    .slice(0, 10);
 
   const reportDate = new Date().toLocaleDateString("en-GB", {
     weekday: "long", year: "numeric", month: "long", day: "numeric",
@@ -323,6 +319,12 @@ async function sendReport() {
 
   const stat = (emoji, label, value, warn = false) =>
     `${emoji} *${label}:* ${warn && value > 0 ? `*${value}* ⚠️` : value}`;
+
+  function healthEmoji(score) {
+    if (score >= 80) return "🟢";
+    if (score >= 50) return "🟡";
+    return "🔴";
+  }
 
   // ── MESSAGE 1: Header + Summary ───────────────────────────
   await sendToSlack({
@@ -335,35 +337,64 @@ async function sendReport() {
         type: "context",
         elements: [{
           type: "mrkdwn",
-          text: `${reportDate}  •  *${totalFlagged} products need attention*`,
+          text: `${reportDate}  •  *${active} active products*`,
         }],
       },
       { type: "divider" },
 
+      // ── Health Scores ──────────────────────────────────────
+      {
+        type: "section",
+        text: { type: "mrkdwn", text: "*🏥 Catalog Health Score*" },
+      },
+      {
+        type: "section",
+        fields: [
+          {
+            type: "mrkdwn",
+            text: `${healthEmoji(catalogHealthScore)} *Overall Catalog:* ${catalogHealthScore}%`,
+          },
+          {
+            type: "mrkdwn",
+            text: `📋 *Based on:* ${TOTAL_CHECKS} required checks per product`,
+          },
+        ],
+      },
+      {
+        type: "context",
+        elements: [{
+          type: "mrkdwn",
+          text: `Required checks: ${REQUIRED_CHECKS.join(" · ")}`,
+        }],
+      },
+      { type: "divider" },
+
+      // ── Product Status ─────────────────────────────────────
       { type: "section", text: { type: "mrkdwn", text: "*📦 Product Status*" } },
       {
         type: "section",
         fields: [
-          { type: "mrkdwn", text: stat( "Active",           active) },
-          { type: "mrkdwn", text: stat( "Draft",            draft,        true) },
-          { type: "mrkdwn", text: stat( "Archived",        archived) },
-          { type: "mrkdwn", text: stat( "Unpublished",      unpublished,  true) },
-          { type: "mrkdwn", text: stat( "Unlisted",         unlisted,     true) },
-          { type: "mrkdwn", text: stat( "Created (7 days)", createdLast7Days) },
-          { type: "mrkdwn", text: stat( "Updated (7 days)", updatedLast7Days) },
+          { type: "mrkdwn", text: stat("✅", "Active",           active) },
+          { type: "mrkdwn", text: stat("📝", "Draft",            draft,        true) },
+          { type: "mrkdwn", text: stat("🗃️", "Archived",        archived) },
+          { type: "mrkdwn", text: stat("👁️", "Unpublished",      unpublished,  true) },
+          { type: "mrkdwn", text: stat("🚫", "Unlisted",         unlisted,     true) },
+          { type: "mrkdwn", text: stat("🆕", "Created (7 days)", createdLast7Days) },
+          { type: "mrkdwn", text: stat("🔄", "Updated (7 days)", updatedLast7Days) },
         ],
       },
       { type: "divider" },
 
-      { type: "section", text: { type: "mrkdwn", text: "*⚠️ Missing Data*" } },
+      // ── Missing Data ───────────────────────────────────────
+      { type: "section", text: { type: "mrkdwn", text: "*⚠️ Missing Data (Failed Checks)*" } },
       {
         type: "section",
         fields: [
           { type: "mrkdwn", text: stat("🔖", "Barcode",      missingBarcode) },
-          { type: "mrkdwn", text: stat("🏷️", "SKU",         missingSKU) },
+          { type: "mrkdwn", text: stat("🏷️", "SKU",          missingSKU) },
           { type: "mrkdwn", text: stat("⚖️", "Weight",       missingWeight) },
           { type: "mrkdwn", text: stat("📐", "Size",          missingSize) },
-          { type: "mrkdwn", text: stat("🖼️", "Image",        missingImage) },
+          { type: "mrkdwn", text: stat("🖼️", "Media",        missingImage) },
           { type: "mrkdwn", text: stat("💰", "Price",         missingPrice) },
           { type: "mrkdwn", text: stat("🧾", "Cost",          missingCost) },
           { type: "mrkdwn", text: stat("🏷️", "Tags",         missingTags) },
@@ -373,6 +404,7 @@ async function sendReport() {
       },
       { type: "divider" },
 
+      // ── Inventory & Duplicates ─────────────────────────────
       { type: "section", text: { type: "mrkdwn", text: "*🔍 Inventory & Duplicates*" } },
       {
         type: "section",
@@ -384,15 +416,16 @@ async function sendReport() {
       },
       { type: "divider" },
 
-      { type: "section", text: { type: "mrkdwn", text: "*📡 Sales Channel / Distribution Audit*" } },
+      // ── Sales Channel Audit ────────────────────────────────
+      { type: "section", text: { type: "mrkdwn", text: "*📡 Sales Channel Audit*" } },
       {
         type: "section",
         fields: [
-          { type: "mrkdwn", text: stat("🛍️", "Missing Online Store",    missingOnlineStore) },
-          { type: "mrkdwn", text: stat("🤝", "Missing Wholesale",        missingWholesale) },
-          { type: "mrkdwn", text: stat("🏪", "Missing POS",              missingPOS) },
-          { type: "mrkdwn", text: stat("🚫", "Not Published Anywhere",   notPublishedAnywhere) },
-          { type: "mrkdwn", text: stat("⚡", "Channel Conflicts",        channelConflict) },
+          { type: "mrkdwn", text: stat("🛍️", "Missing Online Store",  missingOnlineStore) },
+          { type: "mrkdwn", text: stat("🤝", "Missing Wholesale",      missingWholesale) },
+          { type: "mrkdwn", text: stat("🏪", "Missing POS",            missingPOS) },
+          { type: "mrkdwn", text: stat("🚫", "Not Published Anywhere", notPublishedAnywhere) },
+          { type: "mrkdwn", text: stat("⚡", "Channel Conflicts",      channelConflict) },
         ],
       },
     ],
@@ -400,25 +433,38 @@ async function sendReport() {
 
   await new Promise((res) => setTimeout(res, 500));
 
-  // ── MESSAGES 2+: Missing Data product list (chunked) ──────
-  await sendProductListToSlack(
-    "📋 Products with Missing Data",
-    productMissingRows,
-    "missing"
-  );
+  // ── MESSAGE 2: Priority Products (top 10 lowest health scores) ──
+  if (priorityProducts.length > 0) {
+    const lines = priorityProducts.map((p, i) => {
+      const rank    = i + 1;
+      const emoji   = healthEmoji(p.score);
+      const missing = p.missing.length > 0 ? p.missing.join(", ") : "—";
+      return `${rank}. ${emoji} <${p.link}|${p.title}>\n   Score: *${p.score}%* · Missing: \`${missing}\``;
+    });
+
+    await sendToSlack({
+      blocks: [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: `*🚨 Priority Products — Lowest Health Scores (Top ${priorityProducts.length})*\n_Active products needing immediate attention_`,
+          },
+        },
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: lines.join("\n\n"),
+          },
+        },
+      ],
+    });
+  }
 
   await new Promise((res) => setTimeout(res, 500));
 
-  // ── MESSAGES N+: Channel Issues product list (chunked) ────
-  await sendProductListToSlack(
-    "📡 Products with Channel Issues",
-    productChannelRows,
-    "issues"
-  );
-
-  await new Promise((res) => setTimeout(res, 500));
-
-  // ── FINAL: Footer ─────────────────────────────────────────
+  // ── FINAL: Footer ──────────────────────────────────────────
   await sendToSlack({
     blocks: [
       { type: "divider" },
@@ -426,13 +472,13 @@ async function sendReport() {
         type: "context",
         elements: [{
           type: "mrkdwn",
-          text: `🤖 Auto-generated Shopify Audit Report  •  ${reportDate}`,
+          text: `🤖 Auto-generated Shopify Audit Report  •  ${reportDate}  •  Catalog Health: ${healthEmoji(catalogHealthScore)} ${catalogHealthScore}%`,
         }],
       },
     ],
   });
 
-  console.log(`✅ Slack report sent — ${totalFlagged} products flagged`);
+  console.log(`✅ Slack report sent — Catalog health: ${catalogHealthScore}% — ${priorityProducts.length} priority products flagged`);
 }
 
 sendReport().catch(console.error);
